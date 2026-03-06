@@ -29,25 +29,20 @@ _dd_signing_on_for_host()
     local host="$1" snap
     snap=$(cat /proc/fs/cifs/DebugData 2>/dev/null) || return 2
     echo "$snap" >> $seqres.full
-    awk -v host_lc="${host,,}" '
-        BEGIN { RS="^[[:space:]]*[0-9]+[)].*ConnectionId:"; found=0 }
-        NR==1 { next }
-        {
-            block=tolower($0)
-            if (index(block, host_lc)) {
-                found=1
-                if (block ~ /sign/ && block ~ /(on|yes|true|enable)/) {
-                    print 1
-                } else {
-                    print 0
-                }
-                exit
-            }
+    # Look for signing state in the server block containing our hostname.
+    # Kernel 6.x format: "Dialect 0x311 signed" or "SessionId: 0xNNN signed"
+    # Older format: "Signing: on/yes/true/enabled"
+    awk -v host="$host" '
+        BEGIN { found=0; inblock=0; host_lc=tolower(host) }
+        /ConnectionId:/ || /^[[:space:]]*Servers:/ { inblock=0 }
+        { line_lc = tolower($0) }
+        /ConnectionId:/ && index(line_lc, host_lc) > 0 { inblock=1; next }
+        inblock == 1 && /ConnectionId:/ { inblock=0; next }
+        inblock == 1 {
+            if (line_lc ~ /signed/) { found=1 }
+            if (line_lc ~ /sign/ && line_lc ~ /(on|yes|true|enable)/) { found=1 }
         }
-        END {
-            if (!found)
-                print ""
-        }
+        END { if (found) print 1; else print "" }
     ' <<< "$snap"
 }
 

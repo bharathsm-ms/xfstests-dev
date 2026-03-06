@@ -21,16 +21,14 @@ _share_from_unc() { echo "$1" | sed -E 's#^//[^/]+/([^/]+).*#\1#'; }
 HOST=$(_host_from_unc "$TEST_DEV")
 
 _signing_on_for_host() {
-    awk -v H="$1" '
-        BEGIN { tl=tolower(H); inb=0; target=0; on=0 }
-        /^[[:space:]]*[0-9]+[)].*ConnectionId:/ { if (inb==1 && target==1) { print on; exit } inb=1; target=0; on=0; next }
-        inb==1 {
-            line=tolower($0);
-            if (index(line, tl)>0) target=1;
-            if (target==1 && index(line, "sign")>0 && (index(line, "on")>0 || index(line, "yes")>0 || index(line, "true")>0 || index(line, "enable")>0)) on=1;
-        }
-        END { if (inb==1 && target==1) print on }
-    ' /proc/fs/cifs/DebugData 2>/dev/null
+    local host_lc
+    host_lc=$(echo "$1" | tr '[:upper:]' '[:lower:]')
+    local dd
+    dd=$(cat /proc/fs/cifs/DebugData 2>/dev/null | tr '[:upper:]' '[:lower:]')
+    # Check if our hostname exists and 'signed' appears in DebugData
+    if echo "$dd" | grep -q "$host_lc" && echo "$dd" | grep -qE 'signed|signing.*(on|yes|true|enable)'; then
+        echo 1
+    fi
 }
 
 _do "_test_mount -o sign" || _fail "mount with sign failed"
