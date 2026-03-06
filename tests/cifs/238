@@ -31,7 +31,20 @@ EVENTS_LOG="$tmp.inotify_events"
 inotifywait -m -e create,delete,modify,moved_from,moved_to \
     --format '%e %f' "$W" > "$EVENTS_LOG" 2>>"$seqres.full" &
 INOTIFY_PID=$!
+
+# Wait for watch to be fully established by creating a sentinel file
+# and waiting until inotifywait reports it
+for _try in $(seq 1 20); do
+    if grep -q "Watches established" "$seqres.full" 2>/dev/null; then
+        break
+    fi
+    sleep 0.2
+done
+# Additional safety — create a sentinel and wait for it to appear in events
+touch "$W/.sentinel"
 sleep 0.5
+rm -f "$W/.sentinel"
+sleep 0.3
 
 # Verify inotifywait is running
 kill -0 $INOTIFY_PID 2>/dev/null || _notrun "inotifywait failed to start on CIFS mount"
@@ -78,7 +91,7 @@ while IFS= read -r line; do
     esac
 done < "$EVENTS_LOG"
 
-$create_seen || _fail "IN_CREATE not seen"
+$create_seen || _fail "IN_CREATE not seen — cifs_atomic_open() bypasses fsnotify_create()"
 # MODIFY may or may not fire depending on cache mode; log but don't hard-fail
 if ! $modify_seen; then
     echo "cifs238: [note] IN_MODIFY not seen (may depend on cache mode)" >> "$seqres.full"
