@@ -59,7 +59,8 @@ done
 collect() {
     local dir="$1"
     grep -F "$dir/" /proc/fs/cifs/open_files 2>/dev/null |
-        sed -n 's/^.* \([^ ]*\/f[0-9][0-9]*\) .*Lease[^:]*: *\([A-Z][A-Z]*\).*/\1 \2/p'
+        grep -v '^#' |
+        awk '{ if ($9 ~ /^[RHWN]/) print $8, $9 }'
 }
 
 # Wait for leases
