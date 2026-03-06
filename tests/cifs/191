@@ -50,15 +50,21 @@ share=$(echo "$TEST_DEV" | sed -n 's#^//[^/]*/\([^/]*\).*#\1#p')
 
 share_pattern="\\\\$host\\$share"
 
-# Ensure the server advertises multichannel capability
-if ! awk -v host="$host" '/Server capabilities:/{cap=$0} tolower($0) ~ host {print cap}' "$DEBUG_DATA" | grep -qi "multi channel"; then
-    _notrun "server does not advertise multichannel capability"
+# Ensure the server advertises multichannel capability (bit 3 of Server capabilities)
+cap_hex=$(awk '/Server capabilities:/ {sub(/.*0x/, ""); sub(/[^0-9a-fA-F].*/, ""); print; exit}' "$DEBUG_DATA")
+if [ -n "$cap_hex" ]; then
+    cap_val=$((0x$cap_hex))
+    if [ $((cap_val & 0x8)) -eq 0 ]; then
+        _notrun "server does not advertise multichannel capability (caps=0x$cap_hex)"
+    fi
+else
+    _notrun "could not parse server capabilities from DebugData"
 fi
 
-TOTAL_MB=${CIFS191_TOTAL_MB:-256}
-BLOCK_MB=${CIFS191_BLOCK_MB:-1}
-THREADS=${CIFS191_THREADS:-4}
-GAIN_PCT=${CIFS191_MIN_GAIN_PCT:-5}
+TOTAL_MB=${CIFS191_TOTAL_MB:-2048}
+BLOCK_MB=${CIFS191_BLOCK_MB:-4}
+THREADS=${CIFS191_THREADS:-8}
+GAIN_PCT=${CIFS191_MIN_GAIN_PCT:-100}
 
 case "$TOTAL_MB" in ''|*[^0-9]*) _notrun "TOTAL_MB must be integer" ;; esac
 case "$BLOCK_MB" in ''|*[^0-9]*) _notrun "BLOCK_MB must be integer" ;; esac
@@ -278,14 +284,37 @@ run_workload()
     rm -f "$outfile" >/dev/null 2>&1 || true
     local start_ns end_ns duration throughput
 
+    # Write phase
     start_ns=$(date +%s%N)
     "$WRITER_BIN" "$outfile" "$TOTAL_BYTES" "$BLOCK_BYTES" "$THREADS" >>$seqres.full 2>&1 || return 1
     end_ns=$(date +%s%N)
 
-    duration=$((end_ns - start_ns))
-    [ "$duration" -gt 0 ] || duration=1
+    local write_dur=$((end_ns - start_ns))
+    [ "$write_dur" -gt 0 ] || write_dur=1
 
-    throughput=$(CIFS191_SIZE=$TOTAL_BYTES CIFS191_DUR=$duration python3 - <<'PY'
+    # Drop caches to force read from server
+    echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || true
+    sync
+
+    # Read phase — parallel dd reads from multiple offsets
+    local read_start_ns read_end_ns read_dur
+    read_start_ns=$(date +%s%N)
+    local per_thread=$((TOTAL_BYTES / THREADS))
+    local pids=""
+    for i in $(seq 0 $((THREADS - 1))); do
+        dd if="$outfile" of=/dev/null bs=$BLOCK_BYTES skip=$((i * per_thread / BLOCK_BYTES)) count=$((per_thread / BLOCK_BYTES)) 2>/dev/null &
+        pids="$pids $!"
+    done
+    for p in $pids; do wait $p; done
+    read_end_ns=$(date +%s%N)
+    read_dur=$((read_end_ns - read_start_ns))
+    [ "$read_dur" -gt 0 ] || read_dur=1
+
+    # Total = write + read
+    duration=$((write_dur + read_dur))
+
+    local total_data=$((TOTAL_BYTES * 2))  # write + read
+    throughput=$(CIFS191_SIZE=$total_data CIFS191_DUR=$duration python3 - <<'PY'
 import os
 size = int(os.environ['CIFS191_SIZE'])
 dur = int(os.environ['CIFS191_DUR'])
@@ -295,7 +324,7 @@ PY
 )
     [ -n "$throughput" ] || return 1
 
-    echo "cifs191: ${label}_duration_ns=$duration throughput_MBps=$throughput" >>$seqres.full
+    echo "cifs191: ${label} write_ns=$write_dur read_ns=$read_dur total_MBps=$throughput" >>$seqres.full
 
     rm -f "$outfile" >/dev/null 2>&1 || true
     echo "$throughput"
@@ -307,10 +336,9 @@ baseline_speed=$(run_workload "$MNT_SINGLE" "single") || _fail "single-channel w
 drop_caches
 mc_speed=$(run_workload "$MNT_MULTI" "multichannel") || _fail "multichannel workload failed"
 
-channels=$(awk -v share="$share_pattern" '
-    /Shares:/ {inshare=0}
-    index($0, share) {inshare=1}
-    inshare && /Channels:/ {print $2; exit}
+channels=$(awk '
+    /Allocated channels:/ { sum += $3 }
+    END { if (sum > 0) print sum }
 ' "$DEBUG_DATA")
 
 if [ -z "$channels" ] || [ "$channels" -lt 2 ]; then
@@ -344,8 +372,12 @@ PY
 )
 
 required=$((100 + GAIN_PCT))
-if [ "$cmp_result" -lt "$required" ]; then
-    _fail "multichannel throughput gain below ${GAIN_PCT}% (baseline=$baseline_speed MB/s multichannel=$mc_speed MB/s)"
+if [ "$cmp_result" -lt 100 ]; then
+    # Multichannel is SLOWER than single channel — this is a real problem
+    _fail "multichannel ($channels channels) slower than single channel (baseline=$baseline_speed MB/s multichannel=$mc_speed MB/s)"
+elif [ "$cmp_result" -lt "$required" ]; then
+    # Multichannel gain is below 2x — flag as failure
+    _fail "multichannel ($channels channels) gain below ${GAIN_PCT}% (baseline=$baseline_speed MB/s multichannel=$mc_speed MB/s, expected 2x)"
 fi
 
 echo "Multichannel throughput improvement OK"
