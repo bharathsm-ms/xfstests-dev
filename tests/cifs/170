@@ -115,6 +115,9 @@ dump_open_files
 [ -n "$phase2" ] || _fail "did not observe dual RH leases after second open (states: $states)"
 echo "cifs170: phase2 states=$states" >> $seqres.full
 
+# Snapshot phase2 state for comparison
+phase2_states="$states"
+
 # Phase 3: Client2 obtains write handle and writes; expect client1 lease removal/break.
 exec {fd2w}<> "$F2" || _fail "client2 rw open"
 printf "YY" >&$fd2w || _fail "client2 write"
@@ -123,16 +126,18 @@ retry=35
 phase3=""
 while [ $retry -gt 0 ]; do
     states=$(collect_states "$FNAME")
-    # Success: lease was broken — states should be different from phase2.
-    # Accept: NONE on all entries, or downgrade to R, or one RH + one NONE.
-    # The key check: at least one entry should NOT be RHW/RWH anymore
-    # (proving the write caused a lease break).
-    has_full_lease=0
-    for s in $states; do
-        if _has_rwh "$s"; then has_full_lease=1; fi
-    done
-    if [ "$has_full_lease" -eq 0 ] && [ -n "$states" ]; then
-        phase3=1; break
+    # Verify actual state CHANGE from phase2 — not just absence of RWH.
+    # Phase 2 had all RH. After client2 writes, we expect downgrade:
+    # at least one entry must change from RH to NONE, R, or disappear.
+    if [ "$states" != "$phase2_states" ] && [ -n "$states" ]; then
+        # States changed — verify no entry gained a lease (should only lose)
+        has_full=0
+        for s in $states; do
+            if _has_rwh "$s"; then has_full=1; fi
+        done
+        if [ "$has_full" -eq 0 ]; then
+            phase3=1; break
+        fi
     fi
     sleep 0.2; retry=$((retry-1))
 done

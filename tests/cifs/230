@@ -128,8 +128,8 @@ _test_unmount > /dev/null 2>&1
 echo "Y" > "$GCM_REQUIRE"
 echo "phase2: require_gcm_256=Y" >> $seqres.full
 
-if _do "_test_mount -o seal" 2>>$seqres.full; then
-    # Mount succeeded -> check cipher
+if _do "_test_mount -o seal,nosharesock" 2>>$seqres.full; then
+    # Mount succeeded with require_gcm_256 → cipher MUST be AES-256-GCM
     cipher2=$(_dd_cipher_for_host "$HOST")
     echo "phase2 cipher=$cipher2" >> $seqres.full
 
@@ -138,9 +138,7 @@ if _do "_test_mount -o seal" 2>>$seqres.full; then
             echo "require_gcm_256: correctly negotiated AES-256-GCM" >> $seqres.full
             ;;
         *)
-            # Session may have been reused from phase1 (same host/share).
-            # require_gcm_256 only affects new negotiate — not cached sessions.
-            echo "phase2: session reused from phase1, cipher=$cipher2 (expected on session reuse)" >> $seqres.full
+            _fail "require_gcm_256=Y but negotiated cipher is $cipher2 (expected AES-256-GCM)"
             ;;
     esac
 
@@ -159,14 +157,14 @@ echo "N" > "$GCM_ENABLE"
 echo "N" > "$GCM_REQUIRE"
 echo "phase3: enable_gcm_256=N require_gcm_256=N" >> $seqres.full
 
-if _do "_test_mount -o seal" 2>>$seqres.full; then
+if _do "_test_mount -o seal,nosharesock" 2>>$seqres.full; then
     cipher3=$(_dd_cipher_for_host "$HOST")
     echo "phase3 cipher=$cipher3" >> $seqres.full
 
     # Should NOT be AES-256-GCM since we disabled it
     case "$cipher3" in
         0x0004|0x00004|*aes256gcm*)
-            echo "WARNING: AES-256-GCM negotiated even with enable_gcm_256=N" >> $seqres.full
+            _fail "AES-256-GCM negotiated even with enable_gcm_256=N (cipher=$cipher3)"
             ;;
         *)
             echo "phase3: correctly fell back to $cipher3" >> $seqres.full

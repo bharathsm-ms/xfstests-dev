@@ -21,14 +21,26 @@ _share_from_unc() { echo "$1" | sed -E 's#^//[^/]+/([^/]+).*#\1#'; }
 HOST=$(_host_from_unc "$TEST_DEV")
 
 _signing_on_for_host() {
-    local host_lc
-    host_lc=$(echo "$1" | tr '[:upper:]' '[:lower:]')
-    local dd
-    dd=$(cat /proc/fs/cifs/DebugData 2>/dev/null | tr '[:upper:]' '[:lower:]')
-    # Check if our hostname exists and 'signed' appears in DebugData
-    if echo "$dd" | grep -q "$host_lc" && echo "$dd" | grep -qE 'signed|signing.*(on|yes|true|enable)'; then
-        echo 1
-    fi
+    # Scope the signing check to the connection block containing our hostname.
+    # DebugData format: "ConnectionId: 0xNN Hostname: host" on one line,
+    # then "Dialect 0x311 signed" a few lines later in the same block.
+    awk -v H="$1" '
+        BEGIN { tl=tolower(H); inblock=0; target=0; found=0 }
+        /ConnectionId:/ {
+            # New connection block — check if previous block matched
+            if (target && found) { print 1; exit }
+            inblock=1; target=0; found=0
+        }
+        inblock==1 {
+            line=tolower($0)
+            if (index(line, tl) > 0) target=1
+            if (target && (index(line, "signed") > 0 ||
+                (index(line, "sign") > 0 && (index(line, "on") > 0 ||
+                 index(line, "yes") > 0 || index(line, "true") > 0 ||
+                 index(line, "enable") > 0)))) found=1
+        }
+        END { if (target && found) print 1 }
+    ' /proc/fs/cifs/DebugData 2>/dev/null
 }
 
 _do "_test_mount -o sign" || _fail "mount with sign failed"
