@@ -34,7 +34,12 @@ command -v python3 >/dev/null 2>&1 || _notrun "python3 required"
 command -v gcc >/dev/null 2>&1 || _notrun "gcc required"
 
 DEBUG_DATA=/proc/fs/cifs/DebugData
-if ! grep -q "MULTI_CHANNEL" "$DEBUG_DATA"; then
+# Kernel 6.19+ always has multichannel compiled in (no separate config).
+# Check for the feature via: "MULTI_CHANNEL" in Features line (older kernels),
+# or "Allocated channels:" in DebugData (modern kernels), or the
+# enable_multichannel module parameter.
+if ! grep -qE "MULTI_CHANNEL|Allocated channels:" "$DEBUG_DATA" 2>/dev/null &&
+   ! [ -r /sys/module/cifs/parameters/multichannel ] 2>/dev/null; then
     _notrun "CIFS kernel lacks multichannel support"
 fi
 
