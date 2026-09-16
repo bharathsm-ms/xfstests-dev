@@ -1,15 +1,15 @@
 #!/bin/bash
 # SPDX-License-Identifier: GPL-2.0
 #
-# CIFS: forcedirectio disables client page cache (immediate cross-mount size visibility)
+# CIFS: cache=none direct writes are visible through an independent mount
 #
 # What this test validates
-# - With -o forcedirectio on one mount (M1), writes are not cached in the client page cache.
+# - With -o cache=none on one mount (M1), writes bypass the client page cache.
 # - A second mount (M2) to the same share should immediately observe the increased file size
 #   without waiting or dropping caches.
 #
 # Method
-# - Mount M1 with forcedirectio, M2 without.
+# - Mount M1 with cache=none, M2 with cache=strict,actimeo=0.
 # - Create file via M2 (normal cache path), record initial size (should be small).
 # - Append from M1 (direct I/O path) and immediately stat via M2. Expect new size.
 # - Repeat to strengthen confidence.
@@ -24,35 +24,48 @@ _begin_fstest auto quick
 [ "$FSTYP" = "cifs" ] || _notrun "requires CIFS"
 [ -n "$TEST_DEV" ] || _notrun "TEST_DEV not set"
 
-_register_cleanup "_test_unmount >/dev/null 2>&1"
+M1=""; M2=""; SUB="cifs151.$$.d"
+_cleanup_151()
+{
+	[ -n "$M2" ] && rm -rf "${M2:?}/${SUB:?}" 2>> "$seqres.full"
+	[ -n "$M2" ] && umount "$M2" 2>> "$seqres.full"
+	[ -n "$M1" ] && umount "$M1" 2>> "$seqres.full"
+	[ -n "$M2" ] && rmdir "$M2" 2>> "$seqres.full"
+	[ -n "$M1" ] && rmdir "$M1" 2>> "$seqres.full"
+	_cleanup
+}
+_register_cleanup _cleanup_151
 _test_unmount >/dev/null 2>&1
 
 BASE=$(echo "${MOUNT_OPTIONS:-}" | sed -e 's/^\s*-o\s*//')
-# Remove any forcedirectio to control placement
-BASE=$(echo "$BASE" | awk -F, '{out=""; for(i=1;i<=NF;i++){ if($i=="forcedirectio") continue; out=out (out?"," : "") $i } print out}')
-MO1=$BASE; [ -n "$MO1" ] && MO1="$MO1,forcedirectio" || MO1="forcedirectio"
-MO2=$BASE
+BASE=$(echo "$BASE" | awk -F, '{out=""; for(i=1;i<=NF;i++){ if($i=="forcedirectio" || $i=="nosharesock" || $i ~ /^(cache|actimeo)=/) continue; out=out (out?"," : "") $i } print out}')
+MO1="${BASE:+$BASE,}cache=none,nosharesock"
+MO2="${BASE:+$BASE,}cache=strict,actimeo=0,nosharesock"
 
 M1=$(mktemp -d /tmp/cifs151.fd.XXXXXX) || _fail "mktemp1"
 M2=$(mktemp -d /tmp/cifs151.nfd.XXXXXX) || _fail "mktemp2"
 
-_do "mount -t cifs '$TEST_DEV' '$M1' -o '$MO1'" || _notrun "forcedirectio not supported"
+_do "mount -t cifs '$TEST_DEV' '$M1' -o '$MO1'" || _fail "cache=none mount failed"
 _do "mount -t cifs '$TEST_DEV' '$M2' -o '$MO2'" || _fail "mount M2 failed"
 
-SUB="cifs151.$$.d"; mkdir -p "$M2/$SUB" || _fail "mkdir"
+mkdir -p "$M2/$SUB" || _fail "mkdir"
 F1="$M1/$SUB/f"; F2="$M2/$SUB/f"
 echo "init" > "$F2" || _fail "seed create"
+printf 'init\n' > "$tmp.expected"
 
 sz_old=$(stat -c %s "$F2") || _fail "stat initial"
 
 append_and_check() {
 	local payload=$1
-	printf "%s" "$payload" >> "$F1" || _fail "append via forcedirectio mount failed"
+	printf "%s" "$payload" >> "$F1" || _fail "append via cache=none mount failed"
+	printf "%s" "$payload" >> "$tmp.expected"
 	# Immediate stat from cached mount
-	local sz_new=$(stat -c %s "$F2") || _fail "stat after append"
-	if [ $sz_new -le $sz_old ]; then
-		_fail "size not updated immediately (old=$sz_old new=$sz_new)"
+	local sz_new
+	sz_new=$(stat -c %s "$F2") || _fail "stat after append"
+	if [ "$sz_new" -ne "$((sz_old + ${#payload}))" ]; then
+		_fail "incorrect size after append (old=$sz_old new=$sz_new)"
 	fi
+	cmp "$tmp.expected" "$F2" || _fail "cross-mount contents differ"
 	sz_old=$sz_new
 }
 
@@ -60,7 +73,7 @@ append_and_check "AAAAAA"
 append_and_check "BBBBBBBBBBBB"
 append_and_check "CCCCCCCCCCCCCCCCCCCC"
 
-echo "forcedirectio immediate cross-mount visibility OK"
+echo "cache=none immediate cross-mount visibility OK"
 
 status=0
 exit

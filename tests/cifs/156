@@ -9,26 +9,49 @@ _begin_fstest auto quick
 [ -n "$TEST_DIR" ] || _notrun "TEST_DIR not set"
 [ "$(id -u)" = 0 ] || _notrun "root/iptables required"
 command -v iptables >/dev/null 2>&1 || _notrun "iptables required"
+command -v python3 >/dev/null 2>&1 || _notrun "python3 required"
 
 host=$(echo "$TEST_DEV" | sed -E 's#^//([^/]+)/.*#\1#')
 server_ip=$(getent ahostsv4 "$host" | awk '{print $1; exit}')
 [ -n "$server_ip" ] || _notrun "resolve host failed"
 
 make_mount() {
-	dir=$1; extra=$2
+    local dir=$1 extra=$2
 	mkdir -p "$dir" || _fail "mkdir $dir"
 	if ! mount -t cifs -o "$extra" "$TEST_DEV" "$dir" >>$seqres.full 2>&1; then
-		_notrun "mount $extra"
+        _fail "mount failed for $dir"
 	fi
 }
 
-HARD_MNT="$TEST_DIR-hard.$$"; SOFT_MNT="$TEST_DIR-soft.$$"
+HARD_MNT="/tmp/cifs156.hard.$$"; SOFT_MNT="/tmp/cifs156.soft.$$"
+HARD_FILE="$HARD_MNT/cifs156.$$.hard"
+SOFT_FILE="$SOFT_MNT/cifs156.$$.soft"
+HP=""; SP=""
+OUTPUT_DROPPED=false
+INPUT_DROPPED=false
+output_rule=(-d "$server_ip" -p tcp --dport 445 -m comment --comment "cifs156.$$" -j DROP)
+input_rule=(-s "$server_ip" -p tcp --sport 445 -m comment --comment "cifs156.$$" -j DROP)
+restore_traffic() {
+    if $OUTPUT_DROPPED; then
+        iptables -D OUTPUT "${output_rule[@]}" 2>> "$seqres.full" || return 1
+        OUTPUT_DROPPED=false
+    fi
+    if $INPUT_DROPPED; then
+        iptables -D INPUT "${input_rule[@]}" 2>> "$seqres.full" || return 1
+        INPUT_DROPPED=false
+    fi
+}
 cleanup_156() {
-	iptables -D OUTPUT -d "$server_ip" -p tcp --dport 445 -j DROP >/dev/null 2>&1 || true
-	iptables -D INPUT -s "$server_ip" -p tcp --sport 445 -j DROP >/dev/null 2>&1 || true
+    restore_traffic || status=1
+    local child
+    for child in $HP $SP; do kill "$child" 2>/dev/null || true; done
+    for child in $HP $SP; do wait "$child" 2>/dev/null || true; done
+    HP=""; SP=""
+    rm -f "$HARD_FILE" "$SOFT_FILE" 2>> "$seqres.full" || status=1
 	umount "$HARD_MNT" >/dev/null 2>&1 || true
 	umount "$SOFT_MNT" >/dev/null 2>&1 || true
 	rmdir "$HARD_MNT" "$SOFT_MNT" >/dev/null 2>&1 || true
+    _cleanup
 }
 _register_cleanup cleanup_156
 
@@ -78,26 +101,66 @@ extra_opts=$(echo "${MOUNT_OPTIONS#-o}" | sed 's/^[[:space:]]*//' | awk -F, '{
 }')
 [ -n "$extra_opts" ] && base_opts="$base_opts,$extra_opts"
 
-make_mount "$HARD_MNT" "hard,timeo=600,retrans=3,$base_opts"
-make_mount "$SOFT_MNT" "soft,timeo=5,retrans=1,$base_opts"
+make_mount "$HARD_MNT" "$base_opts,hard,retrans=1,echo_interval=1,cache=none,nosharesock,nomultichannel"
+make_mount "$SOFT_MNT" "$base_opts,soft,retrans=1,echo_interval=1,cache=none,nosharesock,nomultichannel"
 
-dd if=/dev/zero of="$HARD_MNT/hard.big" bs=1M count=8 oflag=direct 2>>$seqres.full || true
-dd if=/dev/zero of="$SOFT_MNT/soft.big" bs=1M count=8 oflag=direct 2>>$seqres.full || true
+dd if=/dev/urandom of="$tmp.expected" bs=4096 count=1 status=none || _fail "prepare payload failed"
+dd if="$tmp.expected" of="$HARD_FILE" bs=4096 oflag=direct conv=fsync status=none 2>>$seqres.full || _fail "seed hard file failed"
+dd if="$tmp.expected" of="$SOFT_FILE" bs=4096 oflag=direct conv=fsync status=none 2>>$seqres.full || _fail "seed soft file failed"
 
-iptables -I OUTPUT -d "$server_ip" -p tcp --dport 445 -j DROP || _notrun "iptables add fail"
-iptables -I INPUT -s "$server_ip" -p tcp --sport 445 -j DROP || true
+start_reader() {
+    python3 - "$1" "$tmp.expected" "$2" >> "$seqres.full" 2>&1 <<'PY' &
+import pathlib
+import sys
 
-(dd if="$HARD_MNT/hard.big" of=/dev/null bs=1M count=16 iflag=direct 2>>$seqres.full; echo HARD_DONE > "$TEST_DIR/hard_status") &
-HP=$!
-(dd if="$SOFT_MNT/soft.big" of=/dev/null bs=1M count=16 iflag=direct 2>>$seqres.full; echo SOFT_DONE > "$TEST_DIR/soft_status") &
-SP=$!
+target, expected_path, result_path = sys.argv[1:]
+expected = pathlib.Path(expected_path).read_bytes()
+pathlib.Path(result_path + '.ready').write_text('ready')
+try:
+    with open(target, 'rb', buffering=0) as source:
+        actual = source.read()
+    result = 'ok' if actual == expected else 'mismatch'
+except OSError as error:
+    result = f'error:{error.errno}'
+pathlib.Path(result_path).write_text(result)
+PY
+    reader_pid=$!
+}
 
-sleep 10
+iptables -I OUTPUT "${output_rule[@]}" 2>> "$seqres.full" || _notrun "iptables add fail"
+OUTPUT_DROPPED=true
+iptables -I INPUT "${input_rule[@]}" 2>> "$seqres.full" || _notrun "iptables add fail"
+INPUT_DROPPED=true
 
-hard_done=0; [ -f "$TEST_DIR/hard_status" ] && hard_done=1
-soft_done=0; [ -f "$TEST_DIR/soft_status" ] && soft_done=1
+start_reader "$HARD_FILE" "$tmp.hard"
+HP=$reader_pid
+start_reader "$SOFT_FILE" "$tmp.soft"
+SP=$reader_pid
 
-if [ $soft_done -ne 1 ]; then _fail "soft read did not finish"; fi
-if [ $hard_done -eq 1 ]; then _notrun "hard read completed (likely cache/path), cannot validate hard-vs-soft"; fi
+for attempt in $(seq 1 90); do
+    [ -f "$tmp.hard.ready" ] && [ -f "$tmp.soft.ready" ] && [ -s "$tmp.soft" ] && break
+    sleep 0.5
+done
+[ -s "$tmp.soft" ] || _fail "soft read did not return within 45 seconds of network loss"
+wait "$SP" || _fail "soft worker failed"
+SP=""
+soft_result=$(cat "$tmp.soft")
+echo "cifs156: soft result during outage=$soft_result" >> "$seqres.full"
+case "$soft_result" in
+    error:5|error:101|error:103|error:104|error:107|error:110|error:111|error:112|error:113) ;;
+    *) _fail "soft read did not return a network error ($soft_result)" ;;
+esac
+[ -f "$tmp.hard.ready" ] || _fail "hard worker never started"
+[ ! -e "$tmp.hard" ] && kill -0 "$HP" 2>/dev/null || _fail "hard read returned during network loss"
+
+restore_traffic || _fail "failed to restore traffic"
+for attempt in $(seq 1 90); do
+    [ -s "$tmp.hard" ] && break
+    sleep 0.5
+done
+[ -s "$tmp.hard" ] || _fail "hard read did not recover within 45 seconds"
+wait "$HP" || _fail "hard worker failed"
+HP=""
+[ "$(cat "$tmp.hard")" = "ok" ] || _fail "hard read failed or returned incorrect data after recovery"
 echo "hard vs soft behavior OK"
 status=0; exit

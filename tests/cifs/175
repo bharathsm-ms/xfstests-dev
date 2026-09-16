@@ -1,33 +1,6 @@
 #!/bin/bash
 # SPDX-License-Identifier: GPL-2.0
-# CIFS: Multi-address IP failover (mount.cifs ip=addr1,addr2 list)
-#
-# Objective:
-#   Verify that when mounting with an ip= option containing an unreachable
-#   first address followed by the real server address, the mount succeeds and
-#   /proc/mounts reflects the real (second) IP chosen.
-#
-# Method:
-#   1. Derive server hostname from $TEST_DEV (//host/share)
-#   2. Resolve first usable IPv4 address (REALIP)
-#   3. Attempt mount to a temp dir with ip=BAD,REALIP where BAD is 203.0.113.1
-#      (TEST-NET-3, should be unreachable) unless it equals REALIP; if so use
-#      198.51.100.1 instead.
-#   4. Confirm mount succeeds.
-#   5. Confirm /proc/mounts entry for the temp mount contains ip=REALIP.
-#   6. Success message.
-#
-# Skip conditions:
-#   - Non-CIFS FSTYP
-#   - Not root (needs separate mount)
-#   - Hostname parse or IP resolution failure
-#   - No IPv4 address resolved
-#
-# Notes:
-#   - We do not force ECONNREFUSED vs EHOSTUNREACH; any failure of first IP
-#     that still allows fallback is acceptable.
-#   - If kernel does not rewrite ip= to the chosen IP (edge case), we log
-#     diagnostics and fail to highlight deviation.
+# CIFS: mount.cifs retries resolved server addresses after connection refusal
 
 . ./common/preamble
 . ./common/rc
@@ -36,42 +9,105 @@ _begin_fstest auto quick
 [ "$FSTYP" = "cifs" ] || _notrun "requires CIFS"
 [ "$(id -u)" = 0 ] || _notrun "root required"
 [ -n "$TEST_DEV" ] || _notrun "TEST_DEV not set"
+for required in unshare python3 iptables; do
+    command -v "$required" >/dev/null 2>&1 || _notrun "$required required"
+done
+[ -r /etc/gai.conf ] || _notrun "resolver address-policy file unavailable"
 
-host=$(echo "$TEST_DEV" | sed -n 's#^//\([^/]*\)/.*#\1#p')
-[ -n "$host" ] || _notrun "could not parse host"
-
-# Resolve first IPv4 address for host
+host=${TEST_DEV#//}
+host=${host%%/*}
 REALIP=$(getent ahostsv4 "$host" | awk '{print $1; exit}')
 [ -n "$REALIP" ] || _notrun "resolve IPv4 failed"
+BAD=127.0.0.2
+[ "$BAD" != "$REALIP" ] || BAD=127.0.0.3
+ALIAS="cifs175-$$.invalid"
 
-BAD=203.0.113.1  # TEST-NET-3 reserved documentation network
-if [ "$BAD" = "$REALIP" ]; then BAD=198.51.100.1; fi  # alternate TEST-NET-2
-[ "$BAD" != "$REALIP" ] || _notrun "testnet addresses collide with server"
+base_opts=$(echo "${MOUNT_OPTIONS:-}" | sed -e 's/^[[:space:]]*-o[[:space:]]*//')
+case ",$base_opts," in
+    *,sec=krb5,*|*,sec=krb5i,*) _notrun "private hostname fixture requires password authentication" ;;
+esac
+base_opts=$(printf '%s\n' "$base_opts" | awk -F, '{
+    for (field=1; field<=NF; field++) {
+        if ($field ~ /^(ip|addr|port)=/ || $field=="nosharesock") continue
+        options=options (options ? "," : "") $field
+    }
+    print options
+}')
 
-MNT2=$(mktemp -d /tmp/cifs175.mnt.XXXXXX) || _fail "mktemp"
-_register_cleanup "umount $MNT2 >/dev/null 2>&1 || true; rmdir $MNT2 >/dev/null 2>&1 || true"
+REJECTED=false
+reject_rule=(-d "$BAD" -p tcp -m multiport --dports "445,139" -m comment --comment "cifs175.$$" -j REJECT --reject-with tcp-reset)
+_cleanup_175()
+{
+    if $REJECTED; then
+        iptables -D OUTPUT "${reject_rule[@]}" 2>> "$seqres.full" || status=1
+        REJECTED=false
+    fi
+    _cleanup
+}
+_register_cleanup _cleanup_175
+iptables -I OUTPUT "${reject_rule[@]}" 2>> "$seqres.full" || _notrun "iptables reject rule unavailable"
+REJECTED=true
 
-# Derive base mount options (exclude leading -o, strip existing ip= if present)
-base_opts=$(echo "${MOUNT_OPTIONS:-}" | sed -e 's/^[[:space:]]*-o[[:space:]]*//' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
-if [ -z "$base_opts" ]; then
-    base_opts=$(awk -v mnt="$TEST_DIR" '$2==mnt {print $4}' /proc/mounts)
-fi
-# remove any ip= token(s)
-base_opts=$(echo "$base_opts" | sed -E 's/(^|,)ip=[^,]*//g; s/,,/,/g; s/^,//; s/,$//')
+unshare --mount --propagation private python3 - "$TEST_DEV" "$ALIAS" "$BAD" "$REALIP" "$base_opts" "$seqres.full" <<'PY'
+import os
+import pathlib
+import socket
+import subprocess
+import sys
+import tempfile
 
-IPLIST="$BAD,$REALIP"
-OPTS="ip=$IPLIST,$base_opts"
-echo "cifs175: attempting mount with ip list $IPLIST (real=$REALIP bad=$BAD)" >> $seqres.full
-
-if ! mount -t cifs "$TEST_DEV" "$MNT2" -o "$OPTS" >> $seqres.full 2>&1; then
-    _notrun "mount with multi-ip list unsupported/failed in this environment"
-fi
-
-# Extract mounts line
-mtab_line=$(grep -F " $MNT2 " /proc/mounts | head -n1)
-echo "cifs175: /proc/mounts line: $mtab_line" >> $seqres.full
-
-echo "$mtab_line" | grep -q "ip=$REALIP" || _fail "real ip not recorded in /proc/mounts (expected ip=$REALIP)"
+device, alias, bad, real, options, logfile = sys.argv[1:]
+share = device.removeprefix('//').split('/', 1)[1]
+assert os.readlink('/proc/self/ns/mnt') != os.readlink('/proc/1/ns/mnt')
+with tempfile.TemporaryDirectory(prefix='cifs175.') as directory:
+    root = pathlib.Path(directory)
+    hosts = root / 'hosts'
+    hosts.write_text(pathlib.Path('/etc/hosts').read_text() + f'\n{bad} {alias}\n{real} {alias}\n')
+    precedence = root / 'gai.conf'
+    precedence.write_text(f'precedence ::ffff:{bad}/128 100\nprecedence ::/0 40\n')
+    mountpoint = root / 'mnt'
+    mountpoint.mkdir()
+    mounted = False
+    precedence_mounted = False
+    subprocess.run(['mount', '--bind', str(hosts), '/etc/hosts'], check=True)
+    try:
+        subprocess.run(['mount', '--bind', str(precedence), '/etc/gai.conf'], check=True)
+        precedence_mounted = True
+        addresses = list(dict.fromkeys(item[4][0] for item in socket.getaddrinfo(alias, 445, socket.AF_INET, socket.SOCK_STREAM)))
+        if addresses != [bad, real]:
+            print('resolver does not preserve the required bad-first address order')
+            sys.exit(77)
+        result = subprocess.run(['mount', '-t', 'cifs', f'//{alias}/{share}', str(mountpoint), '-o', f'{options},nosharesock'], stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=60)
+        with open(logfile, 'a') as log:
+            log.write(result.stdout + result.stderr)
+        if result.returncode:
+            raise RuntimeError(f'mount failed with status {result.returncode}')
+        mounted = True
+        if f'could not connect to {bad}' not in result.stderr:
+            raise RuntimeError('no evidence the helper attempted the first address')
+        payload = b'cifs175 address fallback\n'
+        target = mountpoint / alias
+        try:
+            with target.open('wb') as output:
+                output.write(payload)
+                output.flush()
+                os.fsync(output.fileno())
+            if target.read_bytes() != payload:
+                raise RuntimeError('fallback mount data mismatch')
+        finally:
+            target.unlink(missing_ok=True)
+        with open(logfile, 'a') as log:
+            log.write(f'cifs175: refused {bad}, mounted through the only other resolved address {real}; I/O verified\n')
+    finally:
+        if mounted:
+            subprocess.run(['umount', str(mountpoint)], check=True, timeout=30)
+        if precedence_mounted:
+            subprocess.run(['umount', '/etc/gai.conf'], check=True)
+        subprocess.run(['umount', '/etc/hosts'], check=True)
+PY
+result=$?
+[ "$result" -ne 77 ] || _notrun "resolver cannot supply the required bad-first address fixture"
+[ "$result" -eq 0 ] || _fail "resolved-address failover failed"
 
 echo "Multi-address IP failover OK"
 status=0; exit

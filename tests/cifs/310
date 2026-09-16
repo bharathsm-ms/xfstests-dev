@@ -15,14 +15,25 @@
 . ./common/preamble
 . ./common/rc
 _begin_fstest auto stress
+. ./common/cifs_debug
 
 [ "$FSTYP" = "cifs" ] || _notrun "requires CIFS"
 [ -n "$TEST_DEV" ] || _notrun "TEST_DEV not set"
 [ -n "$TEST_DIR" ] || _notrun "TEST_DIR not set"
 [ "$(id -u)" = 0 ] || _notrun "root required"
 
+_host_from_unc() { echo "$1" | sed -E 's#^//([^/]+)/.*#\1#'; }
+_share_from_unc() { echo "$1" | sed -E 's#^//[^/]+/([^/]+).*#\1#'; }
+_unc_windows() { local h=$(_host_from_unc "$1"); local s=$(_share_from_unc "$1"); printf "\\\\%s\\%s" "$h" "$s"; }
+
 NMOUNTS=${CIFS_MOUNT_STRESS_COUNT:-10}
+[[ "$NMOUNTS" =~ ^[0-9]+$ ]] && [ "$NMOUNTS" -ge 2 ] && [ "$NMOUNTS" -le 255 ] || _notrun "mount count must be between 2 and 255"
 W="$TEST_DIR/cifs310.$$"
+HOST=$(_host_from_unc "$TEST_DEV")
+SHARE=$(_share_from_unc "$TEST_DEV")
+UNCW=$(_unc_windows "$TEST_DEV")
+[ -n "$HOST" ] || _notrun "could not derive host"
+[ -n "$SHARE" ] || _notrun "could not derive share"
 
 # Build mount options with nosharesock
 base_opts=$(echo "${MOUNT_OPTIONS:-}" | sed -e 's/^[[:space:]]*-o[[:space:]]*//' -e 's/^[[:space:]]*//')
@@ -39,13 +50,20 @@ fi
 echo "$base_opts" | grep -q "nosharesock" || base_opts="${base_opts},nosharesock"
 
 # Create mount points
-MNT_PFX="/tmp/cifs310.mnt"
+MNT_PFX="/tmp/cifs310.mnt.$$"
+pids=""
 _cleanup_mounts() {
+    if [ -n "$pids" ]; then
+        kill $pids 2>/dev/null || true
+        for child in $pids; do wait "$child" 2>/dev/null || true; done
+        pids=""
+    fi
+    rm -rf "$W" 2>> "$seqres.full" || status=1
     for i in $(seq 1 $NMOUNTS); do
         umount "${MNT_PFX}.$i" 2>/dev/null || true
         rmdir "${MNT_PFX}.$i" 2>/dev/null || true
     done
-    rm -rf "$W" 2>/dev/null || true
+    _cleanup
 }
 _register_cleanup "_cleanup_mounts"
 
@@ -56,24 +74,17 @@ for i in $(seq 1 $NMOUNTS); do
     mkdir -p "$d" || _fail "mkdir $d"
     if ! mount -t cifs "$TEST_DEV" "$d" -o "$base_opts" >>"$seqres.full" 2>&1; then
         echo "cifs310: mount $i failed" >> "$seqres.full"
-        _cleanup_mounts
         _notrun "could not mount $NMOUNTS nosharesock instances (failed at $i)"
     fi
 done
 echo "cifs310: all $NMOUNTS mounts OK" >> "$seqres.full"
 
 # Snapshot OplockBreaks baseline from Stats
-SHARE=$( echo "$TEST_DEV" | sed -E 's#^//[^/]+/([^/]+).*#\1#' )
 _oplock_breaks() {
-    awk -v SH="$SHARE" '
-        BEGIN { inb=0; ob=0 }
-        /^[[:space:]]*[0-9]+\) / { inb = (index($0, SH) > 0) ? 1 : 0; next }
-        inb==1 && $1=="OplockBreaks:" { ob += $2 }
-        inb==1 && NF==0 { inb=0 }
-        END { print ob+0 }
-    ' /proc/fs/cifs/Stats 2>/dev/null
+    _cifs_stat "$TEST_DEV" "OplockBreaks:"
 }
 ob_before=$(_oplock_breaks)
+[ -n "$ob_before" ] || _notrun "could not scope OplockBreaks to $UNCW"
 
 # Create workspace from primary mount
 mkdir -p "$W/shared_dir" || _fail "mkdir workspace"
@@ -81,7 +92,7 @@ mkdir -p "$W/shared_dir" || _fail "mkdir workspace"
 # ============================================================
 # Test 1: 10 processes write to SAME file at unique offsets
 # ============================================================
-SHARED_FILE="cifs310.$$/shared_write"
+SHARED_FILE="cifs310.$$/cifs310.$$.shared_write"
 CHUNK=4096
 
 # Each process writes its mount-index as a repeated byte at offset i*CHUNK
@@ -89,6 +100,7 @@ pids=""
 for i in $(seq 1 $NMOUNTS); do
     mnt="${MNT_PFX}.$i"
     (
+        trap - EXIT HUP INT QUIT TERM
         f="$mnt/$SHARED_FILE"
         offset=$(( (i - 1) * CHUNK ))
         # Write mount-index byte repeated CHUNK times at the unique offset
@@ -109,16 +121,16 @@ fail=0
 for p in $pids; do
     wait $p || fail=$((fail + 1))
 done
+pids=""
 [ $fail -eq 0 ] || _fail "shared file write: $fail of $NMOUNTS processes failed"
 
 # Verify from primary mount: read back all chunks
-sync
-echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || true
+sync -f "$TEST_DIR"
 sleep 1
 
 python3 -c "
 import os, sys
-f = '$W/shared_write'
+f = '$W/cifs310.$$.shared_write'
 fd = os.open(f, os.O_RDONLY)
 errors = 0
 for i in range(1, $NMOUNTS + 1):
@@ -150,10 +162,11 @@ pids=""
 for i in $(seq 1 $NMOUNTS); do
     mnt="${MNT_PFX}.$i"
     (
+        trap - EXIT HUP INT QUIT TERM
         d="$mnt/$SHARED_DIR"
         # Each mount creates 10 files with unique names
         for j in $(seq 1 10); do
-            fname="$d/mount${i}_file${j}"
+            fname="$d/cifs310.$$.mount${i}_file${j}"
             echo "mount${i}_file${j}_data" > "$fname" || exit 1
         done
     ) &
@@ -164,24 +177,24 @@ fail=0
 for p in $pids; do
     wait $p || fail=$((fail + 1))
 done
+pids=""
 [ $fail -eq 0 ] || _fail "shared dir create: $fail of $NMOUNTS processes failed"
 
 # Verify directory from primary mount
-sync
-echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || true
+sync -f "$TEST_DIR"
 sleep 1
 
 expected_files=$((NMOUNTS * 10))
 actual_files=$(ls "$W/shared_dir/" 2>/dev/null | wc -l)
 echo "cifs310: shared_dir: expected=$expected_files actual=$actual_files" >> "$seqres.full"
 
-[ "$actual_files" -ge "$expected_files" ] || \
+[ "$actual_files" -eq "$expected_files" ] || \
     _fail "directory incomplete: expected $expected_files files, found $actual_files"
 
 # Verify content of a sample from each mount
 sample_errors=0
 for i in $(seq 1 $NMOUNTS); do
-    fname="$W/shared_dir/mount${i}_file1"
+    fname="$W/shared_dir/cifs310.$$.mount${i}_file1"
     expected="mount${i}_file1_data"
     got=$(cat "$fname" 2>/dev/null | tr -d '\n\r')
     if [ "$got" != "$expected" ]; then
@@ -200,28 +213,33 @@ pids=""
 for i in $(seq 1 $NMOUNTS); do
     mnt="${MNT_PFX}.$i"
     (
+        trap - EXIT HUP INT QUIT TERM
         f="$mnt/$SHARED_FILE"
-        md5=$(md5sum "$f" 2>/dev/null | awk '{print $1}')
-        echo "$md5" > "/tmp/cifs310.md5.$i.$$"
+        md5=$(md5sum "$f" 2>> "$seqres.full") || exit 1
+        printf '%s\n' "${md5%% *}" > "$tmp.md5.$i"
     ) &
     pids="$pids $!"
 done
 
+fail=0
 for p in $pids; do
-    wait $p || true
+    wait $p || fail=$((fail + 1))
 done
+pids=""
+[ "$fail" -eq 0 ] || _fail "cross-mount checksum workers failed"
 
 # All mounts should see same md5
-ref_md5=$(cat /tmp/cifs310.md5.1.$$ 2>/dev/null)
+ref_md5=$(cat "$tmp.md5.1") || _fail "missing reference checksum"
+[[ "$ref_md5" =~ ^[0-9a-f]{32}$ ]] || _fail "invalid reference checksum"
 md5_fail=0
 for i in $(seq 2 $NMOUNTS); do
-    this_md5=$(cat /tmp/cifs310.md5.$i.$$ 2>/dev/null)
+    this_md5=$(cat "$tmp.md5.$i") || _fail "missing checksum for mount $i"
     if [ "$this_md5" != "$ref_md5" ]; then
         echo "cifs310: md5 mismatch mount$i: $this_md5 vs ref:$ref_md5" >> "$seqres.full"
         md5_fail=$((md5_fail + 1))
     fi
 done
-rm -f /tmp/cifs310.md5.*.$$
+rm -f "$tmp".md5.*
 [ $md5_fail -eq 0 ] || _fail "cross-mount read: $md5_fail md5 mismatches"
 
 echo "cifs310: test3 (cross-mount read consistency) OK" >> "$seqres.full"
@@ -229,24 +247,19 @@ echo "cifs310: test3 (cross-mount read consistency) OK" >> "$seqres.full"
 # ============================================================
 # Test 4: Check lease breaks were triggered
 # ============================================================
-ob_after=$(_oplock_breaks)
+ob_after=$(_oplock_breaks) || _fail "post-run OplockBreaks counter disappeared"
 ob_delta=$((ob_after - ob_before))
 echo "cifs310: OplockBreaks before=$ob_before after=$ob_after delta=$ob_delta" >> "$seqres.full"
 
-# With 10 mounts all accessing same files, we expect some lease breaks
-# (don't fail if server doesn't support leases — just log)
-if [ "$ob_delta" -gt 0 ]; then
-    echo "cifs310: $ob_delta lease breaks observed (expected)" >> "$seqres.full"
-else
-    echo "cifs310: no lease breaks observed (server may not grant leases)" >> "$seqres.full"
-fi
+[ "$ob_delta" -gt 0 ] || _fail "no lease breaks observed for $UNCW"
+echo "cifs310: $ob_delta lease breaks observed (expected)" >> "$seqres.full"
 
 # ============================================================
 # Test 5: Cleanup and check for handle leaks
 # ============================================================
 # Remove workspace from primary mount
-rm -rf "$W" 2>/dev/null || true
-sync
+rm -rf "$W" || _fail "workspace cleanup failed"
+sync -f "$TEST_DIR"
 
 # Unmount all
 for i in $(seq 1 $NMOUNTS); do
@@ -257,7 +270,7 @@ sleep 2
 
 # Check open_files for leaks
 if [ -r /proc/fs/cifs/open_files ]; then
-    leak_count=$(grep -c "cifs310" /proc/fs/cifs/open_files 2>/dev/null) || leak_count=0
+    leak_count=$(awk -v prefix="cifs310.$$." 'index($8, prefix)==1 {count++} END {print count+0}' /proc/fs/cifs/open_files)
     echo "cifs310: open_files leaks=$leak_count" >> "$seqres.full"
     [ "$leak_count" -eq 0 ] || _fail "handle leak: $leak_count entries in open_files"
 fi

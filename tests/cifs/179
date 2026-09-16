@@ -22,30 +22,41 @@ host=$(echo "$TEST_DEV" | sed -E 's#^//([^/]+)/.*#\1#')
 server_ip=$(getent ahostsv4 "$host" | awk '{print $1; exit}')
 [ -n "$server_ip" ] || _notrun "resolve IPv4 failed"
 
-DIR="$TEST_DIR/cifs179.dir"
-FILE="$DIR/holdfile"
-mkdir -p "$DIR" || _fail "mkdir"
-: > "$FILE" || _fail "create file"
-
-_register_cleanup "iptables -D OUTPUT -d $server_ip -p tcp --dport 445 -j DROP 2>/dev/null || true; iptables -D INPUT -s $server_ip -p tcp --sport 445 -j DROP 2>/dev/null || true; kill $HOLDER_PID >/dev/null 2>&1 || true; rm -rf '$DIR' >/dev/null 2>&1 || true"
+DIR=$(mktemp -d "$TEST_DIR/cifs179.XXXXXX") || _fail "mkdir"
+FILE="$DIR/holdfile.${DIR##*/}"
+HOLDER_PID=""
+OUTPUT_DROPPED=false
+INPUT_DROPPED=false
+output_rule=(-d "$server_ip" -p tcp --dport 445 -m comment --comment "${DIR##*/}" -j DROP)
+input_rule=(-s "$server_ip" -p tcp --sport 445 -m comment --comment "${DIR##*/}" -j DROP)
+_cleanup_179() {
+    $OUTPUT_DROPPED && iptables -D OUTPUT "${output_rule[@]}" 2>/dev/null
+    $INPUT_DROPPED && iptables -D INPUT "${input_rule[@]}" 2>/dev/null
+    if [ -n "$HOLDER_PID" ]; then
+        kill "$HOLDER_PID" >/dev/null 2>&1 || true
+        wait "$HOLDER_PID" 2>/dev/null || true
+    fi
+    rm -rf "$DIR" >>$seqres.full 2>&1 || status=1
+    _cleanup
+}
+_register_cleanup _cleanup_179
 
 # Holder keeps fd 9 open and appends periodically.
 (
+    trap - EXIT HUP INT QUIT TERM
     exec 9>>"$FILE" || exit 1
     i=0
     while true; do
         i=$((i+1))
         printf "tick-%d\n" "$i" >&9 || exit 2
-        sleep 0.2
+        sleep 0.2 9>&-
     done
 ) >>$seqres.full 2>&1 &
 HOLDER_PID=$!
-sleep 1
-kill -0 $HOLDER_PID 2>/dev/null || _fail "holder exited early"
 
 parse_pfid_for_pid_file() {
     awk -v pid="$1" -v file="$2" '
-        $6 == pid && ($8 == file || index($8, file)) {
+        $6 == pid && $8 == file {
             print $3
             exit
         }
@@ -60,6 +71,7 @@ wait_pfid() {
     local tries=${3:-50}
     local pfid=""
     while [ "$tries" -gt 0 ]; do
+        kill -0 "$pid" 2>/dev/null || return 1
         pfid=$(parse_pfid_for_pid_file "$pid" "$base")
         if [ -n "$pfid" ]; then
             echo "$pfid"
@@ -76,22 +88,22 @@ is_zero_pfid() {
     [ "$v" = "0" ] || [ "$v" = "0x0" ] || [ "$v" = "0000000000000000" ] || [ "$v" = "0x0000000000000000" ]
 }
 
-PFID1=$(wait_pfid "$HOLDER_PID" "$FILE" 60) || {
-    kill $HOLDER_PID >/dev/null 2>&1 || true
-    _notrun "no open_files entry for holder"
-}
+PFID1=$(wait_pfid "$HOLDER_PID" "$FILE" 60) || _fail "holder failed to expose its open_files entry"
 if is_zero_pfid "$PFID1"; then
-    kill $HOLDER_PID >/dev/null 2>&1 || true
     _notrun "persistent/durable handle not exposed"
 fi
 
 echo "cifs179: pre-reconnect persistent_fid=$PFID1" >>$seqres.full
 
-iptables -I OUTPUT -d "$server_ip" -p tcp --dport 445 -j DROP >>$seqres.full 2>&1 || _notrun "iptables insert failed"
-iptables -I INPUT -s "$server_ip" -p tcp --sport 445 -j DROP >>$seqres.full 2>&1 || _notrun "iptables insert failed"
+iptables -I OUTPUT "${output_rule[@]}" >>$seqres.full 2>&1 || _notrun "iptables insert failed"
+OUTPUT_DROPPED=true
+iptables -I INPUT "${input_rule[@]}" >>$seqres.full 2>&1 || _notrun "iptables insert failed"
+INPUT_DROPPED=true
 sleep 3
-iptables -D OUTPUT -d "$server_ip" -p tcp --dport 445 -j DROP >>$seqres.full 2>&1 || true
-iptables -D INPUT -s "$server_ip" -p tcp --sport 445 -j DROP >>$seqres.full 2>&1 || true
+iptables -D OUTPUT "${output_rule[@]}" >>$seqres.full 2>&1 || _fail "remove OUTPUT rule failed"
+OUTPUT_DROPPED=false
+iptables -D INPUT "${input_rule[@]}" >>$seqres.full 2>&1 || _fail "remove INPUT rule failed"
+INPUT_DROPPED=false
 sleep 2
 
 kill -0 $HOLDER_PID 2>/dev/null || _fail "holder died during reconnect"
@@ -102,6 +114,8 @@ is_zero_pfid "$PFID2" && _fail "persistent fid became zero after reconnect"
 echo "cifs179: post-reconnect persistent_fid=$PFID2" >>$seqres.full
 
 kill $HOLDER_PID >/dev/null 2>&1 || true
+wait "$HOLDER_PID" 2>/dev/null || true
+HOLDER_PID=""
 
 echo "persistent/durable handle reconnect OK"
 status=0

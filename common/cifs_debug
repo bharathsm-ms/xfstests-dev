@@ -1,0 +1,129 @@
+#!/bin/bash
+
+_cifs_debug_share()
+{
+	awk -v unc="$1" '
+		function finish_session() {
+			if (target)
+				print connection, session, channels, interfaces, rss,
+				      nosharesock, (addresses ? addresses : "-"), security, cipher, capabilities
+		}
+		function reset_session() {
+			target=0; session="-"; channels=1; interfaces=0; rss=0
+			in_interfaces=0; addresses=""; address=""; security="-"
+		}
+		BEGIN { reset_session(); connection="-"; cipher="-"; capabilities="-" }
+		/^[[:space:]]*[0-9]+[)] ConnectionId:/ {
+			finish_session(); reset_session()
+			connection=$3; nosharesock=0; cipher="-"; capabilities="-"; next
+		}
+		/^[[:space:]]*[0-9]+[)] (Address|Name):/ {
+			finish_session(); reset_session(); next
+		}
+		/^[[:space:]]*Number of credits:/ && /nosharesock/ { nosharesock=1 }
+		$1=="Server" && $2=="capabilities:" { capabilities=$3 }
+		/^Encryption:.*Negotiated cipher/ {
+			cipher=$0; sub(/.*\(/, "", cipher); sub(/\).*/, "", cipher)
+		}
+		$1=="Security" && $2=="type:" {
+			security=$3
+			for (field=4; field<NF; field++)
+				if ($field=="SessionId:") session=$(field+1)
+		}
+		$1=="Extra" && $2=="Channels:" { channels=$3+1 }
+		/Mounts:/ {
+			name=$0
+			sub(/^[[:space:]]*[0-9]+[)][[:space:]]+/, "", name)
+			sub(/[[:space:]]+Mounts:.*/, "", name)
+			gsub(/\\/, "/", name)
+			if (tolower(name)==tolower(unc)) target=1
+		}
+		$1=="Server" && $2=="interfaces:" {
+			interfaces=$3+0; in_interfaces=1
+		}
+		in_interfaces && $1=="Capabilities:" && tolower($0) ~ /rss/ { rss=1 }
+		in_interfaces && ($1=="IPv4:" || $1=="IPv6:") { address=$2 }
+		in_interfaces && $1=="Allocated" && $2=="channels:" && $3+0>0 && address!="" {
+			addresses=addresses (addresses ? "," : "") address
+		}
+		$1=="MIDs:" { in_interfaces=0 }
+		END { finish_session() }
+	' "${2:-/proc/fs/cifs/DebugData}"
+}
+
+_cifs_wait_multichannel()
+{
+	local unc="$1" required="$2" state tries=30 security cipher capabilities
+	while [ "$tries" -gt 0 ]; do
+		state=$(_cifs_debug_share "$unc")
+		if [ -n "$state" ]; then
+			[ "$(printf '%s\n' "$state" | wc -l)" -eq 1 ] ||
+				_notrun "multiple sessions match target share; isolate the test mount"
+			read -r CIFS_CONNECTION CIFS_SESSION CIFS_CHANNELS CIFS_INTERFACES \
+				CIFS_RSS CIFS_NOSHARESOCK CIFS_INTERFACE_IPS security cipher capabilities <<< "$state"
+			printf 'multichannel: %s\n' "$state" >> "$seqres.full"
+			[ "$CIFS_CHANNELS" -ge "$required" ] && return
+			if [ "$CIFS_INTERFACES" -eq 1 ] && [ "$CIFS_RSS" -eq 0 ]; then
+				_notrun "target session has one non-RSS server interface; multiple channels unavailable"
+			fi
+		fi
+		tries=$((tries - 1))
+		sleep 0.2
+	done
+	[ -n "$state" ] || _notrun "target share not found in DebugData"
+	[ "$CIFS_INTERFACES" -gt 0 ] || _notrun "target session has no server interface information"
+	_fail "target session has $CIFS_CHANNELS channels, expected at least $required"
+}
+
+_cifs_tcp_connections()
+{
+	local host="$1" addresses="$2"
+	{ getent ahosts "$host" | awk '{print $1}'; printf '%s\n' "$addresses" | tr ',' '\n'; } |
+		awk 'NF && $0!="-" { print $1 }' |
+		{
+			local ips
+			ips=$(cat)
+			ss -Hnt | awk -v ips="$ips" '
+				BEGIN { split(ips, addresses, "\n"); for (entry in addresses) wanted[addresses[entry]]=1 }
+				$1=="ESTAB" {
+					peer=$5; port=peer; sub(/.*:/, "", port)
+					sub(/:[^:]*$/, "", peer); gsub(/^\[|\]$/, "", peer)
+					if ((port=="445" || port=="139") && peer in wanted) count++
+				}
+				END { print count+0 }
+			'
+		}
+}
+
+_cifs_stat()
+{
+	awk -v unc="$1" -v counter="$2" '
+		/^[[:space:]]*[0-9]+[)][[:space:]]/ {
+			name=$0
+			sub(/^[[:space:]]*[0-9]+[)][[:space:]]+/, "", name)
+			sub(/[[:space:]]+DISCONNECTED.*/, "", name)
+			sub(/[[:space:]]+$/, "", name)
+			gsub(/\\/, "/", name)
+			target=(tolower(name)==tolower(unc))
+			next
+		}
+		target {
+			for (field=1; field<NF; field++) {
+				if ($field==counter && $(field+1) ~ /^[0-9]+$/) {
+					sum+=$(field+1); found=1
+				}
+			}
+		}
+		END { if (found) print sum+0; else exit 1 }
+	' "${3:-/proc/fs/cifs/Stats}"
+}
+
+_cifs_require_directory_leasing()
+{
+	local capabilities
+	capabilities=$(_cifs_debug_share "$1" | awk '{print $10}' | sort -u)
+	[[ "$capabilities" =~ ^0x[0-9a-fA-F]+$ ]] ||
+		_notrun "target server capabilities unavailable or ambiguous"
+	[ "$((capabilities & 0x20))" -ne 0 ] ||
+		_notrun "target server does not advertise SMB3 directory leasing"
+}

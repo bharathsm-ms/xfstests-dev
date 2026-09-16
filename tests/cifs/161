@@ -9,41 +9,41 @@
 . ./common/preamble
 . ./common/rc
 _begin_fstest auto quick
+. ./common/cifs_debug
 
 [ "$FSTYP" = "cifs" ] || _notrun "requires CIFS"
 [ -n "$TEST_DEV" ] || _notrun "TEST_DEV not set"
 [ -n "$TEST_DIR" ] || _notrun "TEST_DIR not set"
 [ -r /proc/fs/cifs/DebugData ] || _notrun "no DebugData"
 
-_register_cleanup "rm -f \"$TEST_DIR/.cifs161.$$\" >/dev/null 2>&1"
+_cleanup_161()
+{
+  rm -f "$TEST_DIR/.cifs161.$$" >> "$seqres.full" 2>&1 || status=1
+  _cleanup
+}
+_register_cleanup _cleanup_161
 
 # Skip if sec= specified and not a default password case
 mount_line=$(awk -v mnt="$TEST_DIR" '$2==mnt {print; exit}' /proc/mounts)
 [ -n "$mount_line" ] || _notrun "mount entry not found"
 opts=$(echo "$mount_line" | awk '{print $4}')
-if echo "$opts" | grep -qi 'sec=krb'; then _notrun "kerberos mount (different security type)"; fi
-if ! echo "$opts" | grep -qi 'username='; then _notrun "no username= (may be creds file)"; fi
-
-host=$(echo "$TEST_DEV" | sed -E 's#^//([^/]+)/.*#\1#')
-[ -n "$host" ] || _notrun "parse host failed"
-server_ip=$(getent ahostsv4 "$host" | awk '{print $1; exit}')
-[ -n "$server_ip" ] || server_ip=""
-
-# Extract Sessions block
-sessions=$(awk '/Sessions:/ {flag=1; next} flag && NF==0 {flag=0} flag' /proc/fs/cifs/DebugData)
-[ -n "$sessions" ] || _notrun "no sessions block"
-
-# Narrow to session matching server IP (if we resolved it) else first session
-if [ -n "$server_ip" ]; then
-  sess_chunk=$(echo "$sessions" | awk -v ip="$server_ip" 'BEGIN{capture=0} /Address:/ { if($0 ~ ip){capture=1; print; next} else capture=0 } capture && /Security type:/ {print; exit}')
-else
-  sess_chunk=$(echo "$sessions" | awk ' /Security type:/ {print; exit}')
+requested_opts="$TEST_FS_MOUNT_OPTS $MOUNT_OPTIONS"
+if printf '%s\n' "$requested_opts" | grep -Eqi '(^|[ ,])sec=(krb5i?|ntlmv2i?|ntlmi?|none)([, ]|$)'; then
+  _notrun "explicit non-default authentication requested"
+fi
+if ! printf '%s\n' "$opts $requested_opts" | grep -Eqi '(^|[ ,])(username|user|credentials|cred)='; then
+  _notrun "no username or credentials option configured"
 fi
 
-sec_line=$(echo "$sess_chunk" | grep -i 'Security type:' || true)
-[ -n "$sec_line" ] || _fail "no security type line"
-stype=$(echo "$sec_line" | sed -n 's/.*Security type:[[:space:]]*\([^ ]*\).*/\1/p')
-[ -n "$stype" ] || _fail "cannot parse type"
+host=$(echo "$TEST_DEV" | sed -E 's#^//([^/]+)/.*#\1#')
+share=$(echo "$TEST_DEV" | sed -E 's#^//[^/]+/([^/]+).*#\1#')
+[ -n "$host" ] || _notrun "parse host failed"
+[ -n "$share" ] || _notrun "parse share failed"
+
+# Touch the mount so its connection block is active in DebugData
+echo x > "$TEST_DIR/.cifs161.$$" 2>>$seqres.full || _fail "activation I/O failed"
+stype=$(_cifs_debug_share "$TEST_DEV" | awk '$8!="-" {print $8}' | sort -u)
+[ -n "$stype" ] || _notrun "no target-session security type in DebugData"
 
 echo "cifs161: parsed security type '$stype'" >> $seqres.full
 if [ "$stype" != "RawNTLMSSP" ]; then

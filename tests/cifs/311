@@ -14,15 +14,34 @@
 . ./common/preamble
 . ./common/rc
 _begin_fstest auto stress
+. ./common/cifs_debug
 
 [ "$FSTYP" = "cifs" ] || _notrun "requires CIFS"
 [ -n "$TEST_DEV" ] || _notrun "TEST_DEV not set"
 [ -n "$TEST_DIR" ] || _notrun "TEST_DIR not set"
 
+_host_from_unc() { echo "$1" | sed -E 's#^//([^/]+)/.*#\1#'; }
+_share_from_unc() { echo "$1" | sed -E 's#^//[^/]+/([^/]+).*#\1#'; }
+_unc_windows() { local h=$(_host_from_unc "$1"); local s=$(_share_from_unc "$1"); printf "\\\\%s\\%s" "$h" "$s"; }
+
 NFILES=5000
 W="$TEST_DIR/cifs311.$$"
-_register_cleanup "rm -rf '$W' >/dev/null 2>&1"
+FILE_PREFIX="cifs311.$$"
+_cleanup_311()
+{
+    rm -rf "$W" 2>> "$seqres.full" || status=1
+    _test_unmount >> "$seqres.full" 2>&1
+    _cleanup
+}
+_register_cleanup _cleanup_311
+HOST=$(_host_from_unc "$TEST_DEV")
+SHARE=$(_share_from_unc "$TEST_DEV")
+UNCW=$(_unc_windows "$TEST_DEV")
+[ -n "$HOST" ] || _notrun "could not derive host"
+[ -n "$SHARE" ] || _notrun "could not derive share"
 
+_test_unmount >/dev/null 2>&1
+_test_mount -o nosharesock,closetimeo=30 >> "$seqres.full" 2>&1 || _fail "deferred-close mount failed"
 mkdir -p "$W" || _fail "mkdir workspace"
 
 # Snapshot dmesg
@@ -31,26 +50,20 @@ dmesg_before=$(dmesg | wc -l)
 # --- Phase 1: Create 5000 files ---
 echo "cifs311: creating $NFILES files" >> "$seqres.full"
 for i in $(seq 1 $NFILES); do
-    echo "data_$i" > "$W/f_$i" || _fail "create f_$i failed at file $i"
+    echo "data_$i" > "$W/${FILE_PREFIX}_$i" || _fail "create f_$i failed at file $i"
 done
-sync
+sync -f "$W"
 echo "cifs311: $NFILES files created" >> "$seqres.full"
 
 # Snapshot Stats (Creates/Closes baseline)
-SHARE=$(echo "$TEST_DEV" | sed -E 's#^//[^/]+/([^/]+).*#\1#')
 _read_stat() {
-    local stat_name="$1"
-    awk -v SH="$SHARE" -v ST="$stat_name" '
-        BEGIN { inb=0; val=0 }
-        /^[[:space:]]*[0-9]+\) / { inb = (index($0, SH) > 0) ? 1 : 0; next }
-        inb==1 && $1==ST { val=$2 }
-        inb==1 && NF==0 { inb=0 }
-        END { print val+0 }
-    ' /proc/fs/cifs/Stats 2>/dev/null
+    _cifs_stat "$TEST_DEV" "$1"
 }
 
 creates_before=$(_read_stat "Creates:")
 closes_before=$(_read_stat "Closes:")
+[ -n "$creates_before" ] || _notrun "could not scope Creates to $UNCW"
+[ -n "$closes_before" ] || _notrun "could not scope Closes to $UNCW"
 echo "cifs311: before storm — Creates=$creates_before Closes=$closes_before" >> "$seqres.full"
 
 # --- Phase 2: Rapid open/close storm (5000 files) ---
@@ -70,9 +83,11 @@ errors = 0
 # Round 1: rapid open-read-close
 for i in range(1, N + 1):
     try:
-        fd = os.open(f'{W}/f_{i}', os.O_RDONLY)
+        fd = os.open(f'{W}/${FILE_PREFIX}_{i}', os.O_RDONLY)
         data = os.read(fd, 64)
         os.close(fd)
+        if data != f'data_{i}\n'.encode():
+            raise OSError('initial data mismatch')
     except Exception as e:
         errors += 1
         if errors <= 5:
@@ -84,9 +99,12 @@ print(f'round1: {N - errors}/{N} OK, {errors} errors', file=sys.stderr)
 errors2 = 0
 for i in range(1, N + 1):
     try:
-        fd = os.open(f'{W}/f_{i}', os.O_WRONLY)
-        os.write(fd, f'updated_{i}\n'.encode())
+        fd = os.open(f'{W}/${FILE_PREFIX}_{i}', os.O_WRONLY | os.O_TRUNC)
+        payload = f'updated_{i}\n'.encode()
+        written = os.write(fd, payload)
         os.close(fd)
+        if written != len(payload):
+            raise OSError('short write')
     except Exception as e:
         errors2 += 1
         if errors2 <= 5:
@@ -98,8 +116,11 @@ print(f'round2: {N - errors2}/{N} OK, {errors2} errors', file=sys.stderr)
 errors3 = 0
 for i in range(1, N + 1):
     try:
-        fd = os.open(f'{W}/f_{i}', os.O_RDONLY)
+        fd = os.open(f'{W}/${FILE_PREFIX}_{i}', os.O_RDONLY)
+        data = os.read(fd, 64)
         os.close(fd)
+        if data != f'updated_{i}\n'.encode():
+            raise OSError('updated data mismatch')
     except Exception as e:
         errors3 += 1
         if errors3 <= 5:
@@ -119,7 +140,7 @@ echo "cifs311: storm complete (3 rounds × $NFILES)" >> "$seqres.full"
 echo "cifs311: verifying file access after storm" >> "$seqres.full"
 bad=0
 for i in 1 100 500 1000 2500 5000; do
-    if [ ! -f "$W/f_$i" ]; then
+    if [ ! -f "$W/${FILE_PREFIX}_$i" ]; then
         echo "cifs311: f_$i missing after storm" >> "$seqres.full"
         bad=$((bad + 1))
     fi
@@ -127,7 +148,7 @@ done
 [ $bad -eq 0 ] || _fail "$bad sample files missing after storm"
 
 # Verify content of updated files
-got=$(cat "$W/f_1" 2>/dev/null | tr -d '\n\r')
+got=$(cat "$W/${FILE_PREFIX}_1" 2>/dev/null | tr -d '\n\r')
 [ "$got" = "updated_1" ] || _fail "f_1 content wrong after storm: '$got'"
 
 echo "cifs311: file access OK after storm" >> "$seqres.full"
@@ -136,8 +157,8 @@ echo "cifs311: file access OK after storm" >> "$seqres.full"
 echo "cifs311: waiting for deferred closes to drain..." >> "$seqres.full"
 sleep 5
 
-creates_after=$(_read_stat "Creates:")
-closes_after=$(_read_stat "Closes:")
+creates_after=$(_read_stat "Creates:") || _fail "Creates counter disappeared"
+closes_after=$(_read_stat "Closes:") || _fail "Closes counter disappeared"
 creates_delta=$((creates_after - creates_before))
 closes_delta=$((closes_after - closes_before))
 
@@ -153,13 +174,18 @@ fi
 
 # --- Phase 5: Check for handle leaks ---
 if [ -r /proc/fs/cifs/open_files ]; then
-    leak_count=$(grep -c "cifs311" /proc/fs/cifs/open_files 2>/dev/null) || leak_count=0
+    leak_count=0
+    for _ in $(seq 1 40); do
+        leak_count=$(awk -v prefix="${FILE_PREFIX}_" 'index($8, prefix)==1 {count++} END {print count+0}' /proc/fs/cifs/open_files)
+        [ "$leak_count" -eq 0 ] && break
+        sleep 1
+    done
     echo "cifs311: open_files entries matching cifs311: $leak_count" >> "$seqres.full"
-    # Some deferred closes may still be pending — don't hard-fail, just warn
-    if [ "$leak_count" -gt 100 ]; then
-        _fail "possible handle leak: $leak_count entries in open_files after $NFILES storm"
-    fi
+    [ "$leak_count" -eq 0 ] || _fail "handle leak: $leak_count entries in open_files after deferred-close drain"
 fi
+closes_final=$(_read_stat "Closes:") || _fail "final Closes counter disappeared"
+[ "$creates_delta" -ge 0 ] || _fail "Creates counter decreased"
+[ "$((closes_final - closes_before))" -ge "$creates_delta" ] || _fail "Closes did not catch up after deferred-close drain"
 
 # --- Phase 6: Check dmesg for warnings ---
 dmesg_after=$(dmesg | wc -l)
@@ -175,7 +201,7 @@ fi
 echo "cifs311: no dmesg warnings" >> "$seqres.full"
 
 # --- Phase 7: Cleanup ---
-rm -rf "$W" 2>/dev/null || true
+rm -rf "$W" || _fail "workspace cleanup failed"
 
 echo "deferred close overflow OK"
 

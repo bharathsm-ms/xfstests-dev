@@ -44,53 +44,81 @@ server_ip=$(getent ahostsv4 "$host" | awk '{print $1; exit}')
 [ -n "$server_ip" ] || _notrun "resolve server ip failed"
 
 NUM=${CIFS_LEASE_RECLAIM_FILES:-40}
-DIR="$TEST_DIR/cifs172.dir"
-rm -rf "$DIR" 2>/dev/null || true
-mkdir -p "$DIR" || _fail "mkdir"
-_register_cleanup "rm -rf '$DIR' >/dev/null 2>&1; iptables -D OUTPUT -d $server_ip -p tcp --dport 445 -j DROP 2>/dev/null || true; iptables -D INPUT -s $server_ip -p tcp --sport 445 -j DROP 2>/dev/null || true"
+[[ "$NUM" =~ ^[1-9][0-9]*$ ]] || _notrun "CIFS_LEASE_RECLAIM_FILES must be positive"
+DIR=$(mktemp -d "$TEST_DIR/cifs172.XXXXXX") || _fail "mkdir"
+FILE_PREFIX="${DIR##*/}.f"
+required=$(((NUM + 1) / 2))
+FILE_FDS=()
+OUTPUT_DROPPED=false
+INPUT_DROPPED=false
+output_rule=(-d "$server_ip" -p tcp --dport 445 -m comment --comment "${DIR##*/}" -j DROP)
+input_rule=(-s "$server_ip" -p tcp --sport 445 -m comment --comment "${DIR##*/}" -j DROP)
+_cleanup_172() {
+    $OUTPUT_DROPPED && iptables -D OUTPUT "${output_rule[@]}" 2>/dev/null
+    $INPUT_DROPPED && iptables -D INPUT "${input_rule[@]}" 2>/dev/null
+    local open_fd
+    for open_fd in "${FILE_FDS[@]}"; do
+        exec {open_fd}>&-
+    done
+    rm -rf "$DIR" >/dev/null 2>&1
+    _cleanup
+}
+_register_cleanup _cleanup_172
 
 # Create and open files
 for i in $(seq 1 $NUM); do
-    f="$DIR/f$i"; : > "$f" || _fail "create f$i"
-    eval "exec {fd}<> '$f'" || _fail "open f$i"
+    f="$DIR/$FILE_PREFIX$i"
+    exec {fd}<>"$f" || _fail "open f$i"
+    FILE_FDS+=("$fd")
     printf "x" >&$fd || _fail "write f$i"
 done
 
 collect() {
-    local dir="$1"
-    grep -F "$dir/" /proc/fs/cifs/open_files 2>/dev/null |
-        grep -v '^#' |
-        awk '{ if ($9 ~ /^[RHWN]/) print $8, $9 }'
+    awk -v pid="$$" -v prefix="$FILE_PREFIX" -v count="$NUM" '
+        $6 == pid && index($8, prefix) == 1 && $9 ~ /^[RHW]+$/ {
+            number = substr($8, length(prefix) + 1)
+            if (number ~ /^[1-9][0-9]*$/ && number + 0 <= count && !seen[$8]++)
+                print $8, $9
+        }
+    ' /proc/fs/cifs/open_files
+}
+
+count_leases() {
+    awk 'NF { count++ } END { print count+0 }'
 }
 
 # Wait for leases
 retry=25
 have=0
 while [ $retry -gt 0 ]; do
-    lines=$(collect "$DIR")
-    have=$(echo "$lines" | awk '{print $1}' | wc -l)
-    [ "$have" -ge $((NUM/2)) ] && break
+    lines=$(collect)
+    have=$(printf '%s\n' "$lines" | count_leases)
+    [ "$have" -ge "$required" ] && break
     sleep 0.2; retry=$((retry-1))
 done
 echo "cifs172: initial_lease_entries=$have expected=$NUM" >> $seqres.full
-[ "$have" -ge $((NUM/2)) ] || _notrun "insufficient initial leases ($have)"
+[ "$have" -ge "$required" ] || _notrun "insufficient initial leases ($have)"
 
 # Snapshot baseline map
 echo "$lines" > "$DIR/base.map"
 
 # Drop traffic
-iptables -I OUTPUT -d "$server_ip" -p tcp --dport 445 -j DROP 2>>$seqres.full || _notrun "iptables OUTPUT rule fail"
-iptables -I INPUT -s "$server_ip" -p tcp --sport 445 -j DROP 2>>$seqres.full || _notrun "iptables INPUT rule fail"
+iptables -I OUTPUT "${output_rule[@]}" 2>>$seqres.full || _notrun "iptables OUTPUT rule fail"
+OUTPUT_DROPPED=true
+iptables -I INPUT "${input_rule[@]}" 2>>$seqres.full || _notrun "iptables INPUT rule fail"
+INPUT_DROPPED=true
 sleep 3
-iptables -D OUTPUT -d "$server_ip" -p tcp --dport 445 -j DROP 2>>$seqres.full || true
-iptables -D INPUT -s "$server_ip" -p tcp --sport 445 -j DROP 2>>$seqres.full || true
+iptables -D OUTPUT "${output_rule[@]}" 2>>$seqres.full || _fail "remove OUTPUT rule failed"
+OUTPUT_DROPPED=false
+iptables -D INPUT "${input_rule[@]}" 2>>$seqres.full || _fail "remove INPUT rule failed"
+INPUT_DROPPED=false
 
 # Recovery: wait for lease reappearance (equal or near baseline count)
 retry=40
 post=0
 while [ $retry -gt 0 ]; do
-    lines2=$(collect "$DIR")
-    post=$(echo "$lines2" | awk '{print $1}' | wc -l)
+    lines2=$(collect)
+    post=$(printf '%s\n' "$lines2" | count_leases)
     echo "cifs172: recovery poll count=$post retry=$retry" >> $seqres.full
     [ "$post" -ge "$have" ] && break
     sleep 0.25; retry=$((retry-1))
