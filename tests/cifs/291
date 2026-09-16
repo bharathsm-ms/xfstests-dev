@@ -58,7 +58,9 @@ expect_enoent "stat non-existent file" stat "$NOFILE"
 expect_enoent "open non-existent file" cat "$NOFILE"
 
 # --- Test 3: readlink non-existent symlink ---
-expect_enoent "readlink non-existent" readlink "$NOFILE"
+# Use 'readlink -v' so the ENOENT is reported on stderr; without -v, readlink
+# is silent on error and there would be nothing for expect_enoent to match.
+expect_enoent "readlink non-existent" readlink -v "$NOFILE"
 
 # --- Test 4: stat file inside non-existent directory ---
 expect_enoent "stat in non-existent dir" stat "$NODIR/somefile"
