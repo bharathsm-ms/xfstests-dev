@@ -28,266 +28,89 @@ _begin_fstest auto stress
 [ -r /proc/fs/cifs/DebugData ] || _notrun "DebugData unavailable"
 
 mount_opts=$(awk -v mnt="$TEST_DIR" '$2==mnt {print $4; exit}' /proc/mounts)
-echo "$mount_opts" | grep -Eq '(^|,)(file_mode|dir_mode)=' && \
-    _notrun "fixed file_mode/dir_mode mount options prevent mode validation"
 
-command -v iptables >/dev/null 2>&1 || _notrun "iptables required"
-command -v sha256sum >/dev/null 2>&1 || _notrun "sha256sum required"
-command -v python3 >/dev/null 2>&1 || _notrun "python3 required"
-command -v gcc >/dev/null 2>&1 || _notrun "gcc required"
-
-host=$(echo "$TEST_DEV" | sed -n 's#^//\([^/]*\)/.*#\1#p')
-[ -n "$host" ] || _notrun "parse host failed"
-server_ip=$(getent ahostsv4 "$host" | awk '{print $1; exit}')
-[ -n "$server_ip" ] || _notrun "resolve server ip failed"
-
-DROP_SECS=${CIFS192_DROP_SECS:-4}
-READ_MB=${CIFS192_READ_MB:-128}
-DIR_FILES=${CIFS192_DIR_FILES:-80}
-META_LOOPS=${CIFS192_META_LOOPS:-120}
-
-case "$READ_MB" in ''|*[^0-9]*) _notrun "READ_MB must be integer" ;; esac
-case "$DIR_FILES" in ''|*[^0-9]*) _notrun "DIR_FILES must be integer" ;; esac
-case "$META_LOOPS" in ''|*[^0-9]*) _notrun "META_LOOPS must be integer" ;; esac
-[ "$READ_MB" -gt 0 ] || _notrun "READ_MB must be >0"
-[ "$DIR_FILES" -gt 0 ] || _notrun "DIR_FILES must be >0"
-[ "$META_LOOPS" -gt 0 ] || _notrun "META_LOOPS must be >0"
-
-WORKDIR="$TEST_DIR/cifs192.$$.work"
-rm -rf "$WORKDIR" 2>/dev/null || true
-mkdir -p "$WORKDIR" || _fail "mkdir workdir"
-
-cleanup()
-{
-    iptables -D OUTPUT -d "$server_ip" -p tcp --dport 445 -j DROP >/dev/null 2>&1 || true
-    iptables -D INPUT -s "$server_ip" -p tcp --sport 445 -j DROP >/dev/null 2>&1 || true
-    rm -rf "$WORKDIR" >/dev/null 2>&1 || true
-    rm -f "$READER_SRC" "$READER_BIN" >/dev/null 2>&1 || true
-}
-_register_cleanup cleanup
-
-READER_SRC=${TMPDIR:-/tmp}/cifs192_reader.c
-READER_BIN=${TMPDIR:-/tmp}/cifs192_reader
-
-cat >"$READER_SRC" <<'EOF'
-#define _GNU_SOURCE
-#include <errno.h>
-#include <fcntl.h>
-#include <inttypes.h>
-#include <stdint.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <unistd.h>
-
-int main(int argc, char **argv)
-{
-    if (argc != 2) {
-        fprintf(stderr, "usage: %s <file>\n", argv[0]);
-        return 2;
-    }
-    int fd = open(argv[1], O_RDONLY);
-    if (fd < 0) {
-        perror("open");
-        return 1;
-    }
-    const size_t buf_sz = 1024 * 1024;
-    unsigned char *buf = malloc(buf_sz);
-    if (!buf) {
-        perror("malloc");
-        close(fd);
-        return 1;
-    }
-    off_t off = 0;
-    for (;;) {
-        ssize_t rc = pread(fd, buf, buf_sz, off);
-        if (rc < 0) {
-            if (errno == EINTR)
-                continue;
-            perror("pread");
-            free(buf);
-            close(fd);
-            return 1;
-        }
-        if (rc == 0)
-            break;
-        off += rc;
-    }
-    free(buf);
-    if (close(fd) < 0) {
-        perror("close");
-        return 1;
-    }
-    return 0;
-}
-EOF
-
-gcc -O2 -Wall -o "$READER_BIN" "$READER_SRC" >>$seqres.full 2>&1 || _fail "compile reader"
-
-DATA_FILE="$WORKDIR/large.bin"
-
-CIFS192_READ_MB=$READ_MB CIFS192_FILE=$DATA_FILE python3 - <<'PY'
-import os
-import random
-from pathlib import Path
-
-size_mb = int(os.environ['CIFS192_READ_MB'])
-path = Path(os.environ['CIFS192_FILE'])
-path.parent.mkdir(parents=True, exist_ok=True)
-total = size_mb * 1024 * 1024
-chunk = 1024 * 1024
-rng = random.Random(1234)
-with open(path, 'wb', buffering=0) as f:
-    written = 0
-    while written < total:
-        block = bytearray(rng.randrange(0, 256) for _ in range(min(chunk, total - written)))
-        f.write(block)
-        written += len(block)
-PY
-
-sha_orig=$(sha256sum "$DATA_FILE" | awk '{print $1}')
-
-force_drop()
-{
-    iptables -I OUTPUT -d "$server_ip" -p tcp --dport 445 -j DROP >>$seqres.full 2>&1 || return 1
-    iptables -I INPUT -s "$server_ip" -p tcp --sport 445 -j DROP >>$seqres.full 2>&1 || return 1
-    sleep "$DROP_SECS"
-    iptables -D OUTPUT -d "$server_ip" -p tcp --dport 445 -j DROP >>$seqres.full 2>&1 || true
-    iptables -D INPUT -s "$server_ip" -p tcp --sport 445 -j DROP >>$seqres.full 2>&1 || true
-    return 0
-}
-
-# Phase 1: Sequential read during disconnect
-"$READER_BIN" "$DATA_FILE" >>$seqres.full 2>&1 &
-reader_pid=$!
-sleep 1
-force_drop || _notrun "iptables manipulation failed"
-wait $reader_pid
-[ $? -eq 0 ] || _fail "reader failed after reconnect"
-
-sha_post=$(sha256sum "$DATA_FILE" | awk '{print $1}')
-[ "$sha_post" = "$sha_orig" ] || _fail "file hash changed after read phase"
-
-# Phase 2: Directory rename churn across reconnect
-DIR_A="$WORKDIR/dir_a"
-DIR_B="$WORKDIR/dir_b"
-rm -rf "$DIR_A" "$DIR_B" 2>/dev/null || true
-mkdir -p "$DIR_A" || _fail "mkdir dir_a"
-mkdir -p "$DIR_B" || _fail "mkdir dir_b"
-
-for i in $(seq 1 "$DIR_FILES"); do
-    printf 'payload%04d' "$i" >"$DIR_A/file.$i" || _fail "seed dir file $i"
+. ./common/cifs_test
+_cifs_test_init
+command -v python3 >/dev/null || _notrun "python3 required"
+command -v ss >/dev/null || _notrun "ss required"
+READ_MB=${CIFS192_READ_MB:-8}
+DIR_FILES=${CIFS192_DIR_FILES:-20}
+META_LOOPS=${CIFS192_META_LOOPS:-20}
+for value in "$READ_MB" "$DIR_FILES" "$META_LOOPS"; do
+    [[ "$value" =~ ^[1-9][0-9]*$ ]] && [ "$value" -le 128 ] || _notrun "workload sizes must be integers from 1 to 128"
 done
-
-CIFS192_DIR_A=$DIR_A CIFS192_DIR_B=$DIR_B CIFS192_DIR_FILES=$DIR_FILES python3 - <<'PY' >>$seqres.full 2>&1 &
-import os
-import time
-import errno
+_cifs_test_socket_snapshot > "$tmp.before"
+mode_option=cifsacl
+case ",$mount_opts," in *,modefromsid,*) mode_option=modefromsid ;; esac
+_cifs_test_mount "vers=3.1.1,cache=none,actimeo=0,nomultichannel,echo_interval=1,$mode_option"
+_cifs_test_mount_option "$mode_option"
+_cifs_test_workspace "$CIFS_TEST_MNT"
+timeout --kill-after=5s 120 python3 - "$CIFS_TEST_WORK" "$tmp" "$READ_MB" "$DIR_FILES" "$META_LOOPS" >> "$seqres.full" 2>&1 <<'PY' &
+import os, stat, sys, time
 from pathlib import Path
-
-dir_a = Path(os.environ['CIFS192_DIR_A'])
-dir_b = Path(os.environ['CIFS192_DIR_B'])
-count = int(os.environ['CIFS192_DIR_FILES'])
-
-for i in range(1, count + 1):
-    # move to dir_b
-    src = dir_a / f"file.{i}"
-    dst = dir_b / f"file.{i}"
-    while True:
-        try:
-            os.replace(src, dst)
-            break
-        except OSError as e:
-            if e.errno in (errno.EIO, errno.ESTALE, errno.ENOTCONN):
-                time.sleep(0.5)
-                continue
-            raise
-
-for i in range(1, count + 1):
-    # rename back into dir_a with new name
-    src = dir_b / f"file.{i}"
-    dst = dir_a / f"renamed.{i}"
-    while True:
-        try:
-            os.replace(src, dst)
-            break
-        except OSError as e:
-            if e.errno in (errno.EIO, errno.ESTALE, errno.ENOTCONN):
-                time.sleep(0.5)
-                continue
-            raise
+root = Path(sys.argv[1])
+barrier = sys.argv[2]
+megabytes, files, loops = map(int, sys.argv[3:])
+def pause(phase):
+    Path(f'{barrier}.ready-{phase}').touch()
+    deadline = time.monotonic() + 30
+    while not Path(f'{barrier}.go-{phase}').exists():
+        assert time.monotonic() < deadline, 'reconnect barrier timeout'
+        time.sleep(0.02)
+expected = bytes(range(256)) * (megabytes * 4096)
+target = root / 'data'
+with target.open('wb', buffering=0) as output:
+    assert output.write(expected) == len(expected)
+    os.fsync(output.fileno())
+with target.open('rb', buffering=0) as source:
+    midpoint = len(expected) // 2
+    assert source.read(midpoint) == expected[:midpoint]
+    pause(1)
+    assert source.read() == expected[midpoint:]
+first, second = root / 'first', root / 'second'
+first.mkdir()
+second.mkdir()
+for number in range(files):
+    assert (first / str(number)).write_text(f'payload-{number}') == len(f'payload-{number}')
+for number in range(files):
+    (first / str(number)).rename(second / str(number))
+    if number == files // 2:
+        pause(2)
+for number in range(files):
+    (second / str(number)).rename(first / f'renamed-{number}')
+assert not list(second.iterdir())
+assert set(os.listdir(first)) == {f'renamed-{number}' for number in range(files)}
+for number in range(files):
+    assert (first / f'renamed-{number}').read_text() == f'payload-{number}'
+metadata = root / 'metadata'
+assert metadata.write_bytes(b'metadata-data') == 13
+for number in range(loops):
+    mode = 0o640 if number % 2 == 0 else 0o600
+    metadata.chmod(mode)
+    os.utime(metadata, (1700000000 + number, 1700000000 + number))
+    if number == loops // 2:
+        pause(3)
+info = metadata.stat()
+assert stat.S_IMODE(info.st_mode) == mode
+assert info.st_mtime_ns == (1700000000 + loops - 1) * 1000000000
+assert metadata.read_bytes() == b'metadata-data'
+assert target.read_bytes() == expected
 PY
-
-dir_pid=$!
-sleep 1
-force_drop || _notrun "iptables manipulation failed"
-wait $dir_pid
-[ $? -eq 0 ] || _fail "directory churn failed"
-
-expected_count=$DIR_FILES
-actual_count=$(find "$DIR_A" -maxdepth 1 -type f -name 'renamed.*' | wc -l)
-
-if [ "$actual_count" -ne "$expected_count" ]; then
-    echo "cifs192: expected $expected_count renamed files, saw $actual_count" >>$seqres.full
-    _fail "directory content mismatch"
-fi
-
-# Phase 3: Metadata toggles across reconnect
-META_FILE="$WORKDIR/meta.txt"
-printf 'metadata test' >"$META_FILE" || _fail "seed meta file"
-
-CIFS192_META_FILE=$META_FILE CIFS192_META_LOOPS=$META_LOOPS python3 - <<'PY' >>$seqres.full 2>&1 &
-import os
-import time
-import errno
-from pathlib import Path
-
-meta_path = Path(os.environ['CIFS192_META_FILE'])
-loops = int(os.environ['CIFS192_META_LOOPS'])
-
-mode_a = 0o640
-mode_b = 0o600
-now = int(time.time())
-
-for i in range(loops):
-    target_mode = mode_a if i % 2 == 0 else mode_b
-    target_time = now + i
-    while True:
-        try:
-            os.chmod(meta_path, target_mode)
-            os.utime(meta_path, (target_time, target_time))
-            break
-        except OSError as e:
-            if e.errno in (errno.EIO, errno.ESTALE, errno.ENOTCONN):
-                time.sleep(0.5)
-                continue
-            raise
-
-with open(meta_path, 'a', encoding='utf-8') as fh:
-    fh.write('\nfinal marker\n')
-PY
-
-meta_pid=$!
-sleep 1
-force_drop || _notrun "iptables manipulation failed"
-wait $meta_pid
-[ $? -eq 0 ] || _fail "metadata loop failed"
-
-final_mode=$(stat -c %a "$META_FILE")
-
-if [ $((META_LOOPS % 2)) -eq 0 ]; then
-    expected_mode=600
-else
-    expected_mode=640
-fi
-
-if [ "$final_mode" -ne "$expected_mode" ]; then
-    echo "cifs192: expected mode $expected_mode got $final_mode" >>$seqres.full
-    _fail "mode mismatch after metadata phase"
-fi
-
-final_count=$(grep -c 'final marker' "$META_FILE")
-[ "$final_count" -ge 1 ] || _fail "metadata file append missing"
+worker=$!
+_cifs_test_children+=("$worker")
+for phase in 1 2 3; do
+    for attempt in $(seq 1 500); do
+        [ ! -e "$tmp.ready-$phase" ] || break
+        kill -0 "$worker" 2>/dev/null || _fail "worker exited before reconnect barrier"
+        sleep 0.02
+    done
+    [ -e "$tmp.ready-$phase" ] || _fail "worker did not reach reconnect barrier"
+    _cifs_test_socket_snapshot > "$tmp.after"
+    _cifs_test_new_socket "$tmp.before" "$tmp.after"
+    _cifs_test_disconnect >> "$seqres.full" 2>&1 || _fail "disconnect test-owned socket failed"
+    touch "$tmp.go-$phase" || _fail "release reconnect barrier"
+done
+_cifs_test_wait
 
 echo "Read, directory, and metadata operations recovered after reconnect OK"
 status=0
