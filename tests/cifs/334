@@ -1,0 +1,90 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-2.0
+#
+# CIFS: /proc/fs/cifs/SecurityFlags read/write
+#
+# Behavior under test
+# - Read /proc/fs/cifs/SecurityFlags — verify valid hex value
+# - Write a known value — verify it takes effect
+# - Restore original value — verify restoration
+# - Verify no crash on invalid writes
+#
+# Kernel code exercised
+#   cifs_security_flags_proc_show, cifs_security_flags_proc_write,
+#   cifs_security_flags_proc_open
+
+. ./common/preamble
+. ./common/rc
+
+_begin_fstest auto quick
+
+[ "$FSTYP" = "cifs" ] || _notrun "requires CIFS"
+[ "$(id -u)" = 0 ] || _notrun "root required"
+[ -f /proc/fs/cifs/SecurityFlags ] || _notrun "SecurityFlags proc not available"
+
+. ./common/cifs_test
+_cifs_test_init
+_cifs_test_save_setting /proc/fs/cifs/SecurityFlags
+
+# ── Test 1: read current value ────────────────────────────────
+echo "test1: read SecurityFlags" >> "$seqres.full"
+orig=$(cat /proc/fs/cifs/SecurityFlags 2>/dev/null)
+echo "test1: current value=$orig" >> "$seqres.full"
+
+# Should be a hex number like 0xc5 or similar
+if echo "$orig" | grep -qE '^0x[0-9a-fA-F]+$'; then
+	echo "test1: valid hex format" >> "$seqres.full"
+else
+	_fail "SecurityFlags has unexpected format: '$orig'"
+fi
+
+# ── Test 2: write a value and read back ───────────────────────
+echo "test2: write SecurityFlags" >> "$seqres.full"
+
+# 0xc5 = default: NTLMSSP + signing
+echo "0xc5" > /proc/fs/cifs/SecurityFlags 2>>"$seqres.full" || _fail "write SecurityFlags"
+val=$(cat /proc/fs/cifs/SecurityFlags 2>/dev/null)
+[ "$val" = 0xc5 ] || _fail "SecurityFlags readback mismatch"
+echo "test2: after write 0xc5, read=$val" >> "$seqres.full"
+
+# Write a different known value: 0x10c5 (enables must_sign)
+echo "0x10c5" > /proc/fs/cifs/SecurityFlags 2>>"$seqres.full" || _fail "write SecurityFlags"
+val2=$(cat /proc/fs/cifs/SecurityFlags 2>/dev/null)
+[ "$val2" = 0x10c5 ] || _fail "SecurityFlags readback mismatch"
+echo "test2: after write 0x10c5, read=$val2" >> "$seqres.full"
+
+# ── Test 3: restore original ─────────────────────────────────
+echo "test3: restore original" >> "$seqres.full"
+echo "$orig" > /proc/fs/cifs/SecurityFlags 2>>"$seqres.full"
+restored=$(cat /proc/fs/cifs/SecurityFlags 2>/dev/null)
+[ "$restored" = "$orig" ] || _fail "SecurityFlags restoration mismatch"
+echo "test3: restored=$restored (original=$orig)" >> "$seqres.full"
+
+# ── Test 4: invalid write — should not crash ──────────────────
+echo "test4: invalid write" >> "$seqres.full"
+dmesg_before=$(dmesg | wc -l)
+
+# Write garbage
+for invalid in garbage 0xFFFFFFFF; do
+	if echo "$invalid" > /proc/fs/cifs/SecurityFlags 2>>"$seqres.full"; then
+		_fail "invalid SecurityFlags accepted"
+	fi
+	[ "$(cat /proc/fs/cifs/SecurityFlags)" = "$orig" ] || _fail "invalid write changed SecurityFlags"
+done
+
+# Restore sane value
+echo "$orig" > /proc/fs/cifs/SecurityFlags 2>/dev/null
+
+# No crash check
+dmesg_after=$(dmesg | wc -l)
+new_lines=$((dmesg_after - dmesg_before))
+if [ $new_lines -gt 0 ]; then
+	if dmesg | tail -n "$new_lines" | grep -qiE 'BUG:|kernel panic|Oops:'; then
+		_fail "kernel crash after SecurityFlags write"
+	fi
+fi
+
+echo "SecurityFlags proc read/write OK"
+
+status=0
+exit

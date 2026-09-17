@@ -1,0 +1,83 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-2.0
+# CIFS: Proc/debug deep + cifs_create + inode backup query
+#
+# Kernel code exercised
+#   cifs_debug.c (cifs_mount_params_proc_show, cifs_mount_params_proc_open,
+#                 cifs_dump_mids, cifs_dump_mem)
+#   dir.c        (cifs_create, cifs_ci_hash, cifs_ci_compare)
+#   inode.c      (cifs_backup_query_path_info, cifs_rename_pending_delete)
+#   cifsfs.c     (cifs_sb_active, cifs_sb_deactive)
+#   cifsglob.h   (is_tcon_dfs, cifs_netbios_name)
+
+. ./common/preamble
+. ./common/rc
+
+_begin_fstest auto quick
+
+[ "$FSTYP" = "cifs" ] || _notrun "requires CIFS"
+[ "$(id -u)" = 0 ] || _notrun "root required"
+[ -n "$TEST_DEV" ] || _notrun "TEST_DEV not set"
+[ -n "$CIFS_CRED_FILE" ] || _notrun "CIFS_CRED_FILE not set"
+
+. ./common/cifs_test
+. ./common/cifs_debug
+_cifs_test_init
+command -v python3 >/dev/null || _notrun "python3 required"
+_cifs_test_mount 'vers=3.1.1,cache=none'
+_cifs_test_workspace "$CIFS_TEST_MNT"
+TDIR=$CIFS_TEST_WORK
+dd if=/dev/urandom of="$tmp.expected" bs=1M count=4 status=none || _fail "prepare expected data"
+for worker in $(seq 1 4); do
+        (dd if="$tmp.expected" of="$TDIR/data-$worker" bs=64K conv=fsync status=none &&
+                cmp "$tmp.expected" "$TDIR/data-$worker") &
+        _cifs_test_children+=("$!")
+done
+for iteration in $(seq 1 10); do
+        row=$(_cifs_debug_share "$TEST_DEV")
+        [ -n "$row" ] || _fail "target missing from DebugData"
+        creates=$(_cifs_stat "$TEST_DEV" 'Creates:') || _fail "target Stats unavailable"
+        [[ "$creates" =~ ^[0-9]+$ ]] || _fail "invalid create counter"
+done
+_cifs_test_wait
+_cifs_test_ioctl_info "$TDIR/data-1" 0x311 >> "$seqres.full" 2>&1 || _fail "mount-info ioctl failed"
+python3 - "$TDIR" >> "$seqres.full" 2>&1 <<'PY'
+import errno, os, sys
+from pathlib import Path
+root = Path(sys.argv[1])
+path = root / 'exclusive'
+descriptor = os.open(path, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600)
+try:
+    assert os.write(descriptor, b'before') == 6
+    try:
+        duplicate = os.open(path, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600)
+    except OSError as error:
+        assert error.errno == errno.EEXIST
+    else:
+        os.close(duplicate)
+        raise AssertionError('exclusive create unexpectedly succeeded')
+    path.unlink()
+    assert not path.exists()
+    assert os.write(descriptor, b'-after') == 6
+    os.fsync(descriptor)
+    assert os.pread(descriptor, 100, 0) == b'before-after'
+finally:
+    os.close(descriptor)
+deep = root.joinpath(*[f'dir-{number}' for number in range(15)])
+deep.mkdir(parents=True)
+assert (deep / 'leaf').write_bytes(b'deep-data') == 9
+assert (deep / 'leaf').read_bytes() == b'deep-data'
+for number in range(50):
+    target = root / f'rapid-{number}'
+    payload = str(number).encode()
+    assert target.write_bytes(payload) == len(payload)
+    assert target.stat().st_size == len(payload)
+    assert target.read_bytes() == payload
+    target.unlink()
+    assert not target.exists()
+PY
+[ "$?" -eq 0 ] || _fail "exclusive create or open-unlink lifecycle failed"
+
+echo "Silence is golden"
+status=0
+exit

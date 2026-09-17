@@ -1,0 +1,71 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-2.0
+#
+# CIFS: /proc/fs/cifs/LinuxExtensionsEnabled — toggle POSIX extensions
+#
+# Behavior under test
+# - Read current LinuxExtensionsEnabled value
+# - Write 0 to disable → verify read-back
+# - Write 1 to enable → verify read-back
+# - Restore original
+# - No crash on invalid writes
+#
+# Kernel code exercised
+#   cifs_linux_ext_proc_show, cifs_linux_ext_proc_write,
+#   cifs_linux_ext_proc_open
+
+. ./common/preamble
+. ./common/rc
+
+_begin_fstest auto quick
+
+[ "$FSTYP" = "cifs" ] || _notrun "requires CIFS"
+[ "$(id -u)" = 0 ] || _notrun "root required"
+[ -f /proc/fs/cifs/LinuxExtensionsEnabled ] || _notrun "LinuxExtensionsEnabled proc not available"
+
+. ./common/cifs_test
+_cifs_test_init
+_cifs_test_save_setting /proc/fs/cifs/LinuxExtensionsEnabled
+
+# ── Test 1: read current value ────────────────────────────────
+orig=$(cat /proc/fs/cifs/LinuxExtensionsEnabled)
+echo "test1: original LinuxExtensionsEnabled=$orig" >> "$seqres.full"
+echo "$orig" | grep -qE '^[0-9]+$' || _fail "unexpected format: '$orig'"
+
+# ── Test 2: disable (write 0) ────────────────────────────────
+echo "test2: disable" >> "$seqres.full"
+echo 0 > /proc/fs/cifs/LinuxExtensionsEnabled || _fail "disable Linux extensions"
+val=$(cat /proc/fs/cifs/LinuxExtensionsEnabled)
+echo "test2: after write 0, val=$val" >> "$seqres.full"
+[ "$val" = "0" ] || _fail "LinuxExtensionsEnabled disable mismatch"
+
+# ── Test 3: enable (write 1) ─────────────────────────────────
+echo "test3: enable" >> "$seqres.full"
+echo 1 > /proc/fs/cifs/LinuxExtensionsEnabled || _fail "enable Linux extensions"
+val2=$(cat /proc/fs/cifs/LinuxExtensionsEnabled)
+echo "test3: after write 1, val=$val2" >> "$seqres.full"
+[ "$val2" = "1" ] || _fail "LinuxExtensionsEnabled enable mismatch"
+
+# ── Test 4: invalid writes ───────────────────────────────────
+echo "test4: invalid writes" >> "$seqres.full"
+for invalid in garbage -1; do
+	if echo "$invalid" > /proc/fs/cifs/LinuxExtensionsEnabled 2>>"$seqres.full"; then
+		[ "$(cat /proc/fs/cifs/LinuxExtensionsEnabled)" = 1 ] || _fail "invalid write changed Linux extensions"
+	fi
+done
+
+# ── Test 5: restore ──────────────────────────────────────────
+echo "$orig" > /proc/fs/cifs/LinuxExtensionsEnabled
+restored=$(cat /proc/fs/cifs/LinuxExtensionsEnabled)
+[ "$restored" = "$orig" ] || _fail "LinuxExtensionsEnabled restoration mismatch"
+echo "test5: restored=$restored (orig=$orig)" >> "$seqres.full"
+
+# No crash
+if dmesg | tail -5 | grep -qiE 'BUG:|kernel panic|Oops:'; then
+	_fail "kernel crash during LinuxExtensionsEnabled test"
+fi
+
+echo "LinuxExtensionsEnabled proc toggle OK"
+
+status=0
+exit

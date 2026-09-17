@@ -1,0 +1,57 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-2.0
+# CIFS: ioctl fsinfo and tcon_info — mount information ioctls
+#
+# Kernel code exercised
+#   ioctl.c    (smb_mnt_get_fsinfo, smb_mnt_get_tcon_info, cifs_ioctl)
+#   smb2ops.c  (smb2_get_dfs_refer, smb3_qfs_tcon)
+
+. ./common/preamble
+. ./common/rc
+
+_begin_fstest auto quick
+
+[ "$FSTYP" = "cifs" ] || _notrun "requires CIFS"
+[ "$(id -u)" = 0 ] || _notrun "root required"
+[ -n "$TEST_DEV" ] || _notrun "TEST_DEV not set"
+[ -n "$CIFS_CRED_FILE" ] || _notrun "CIFS_CRED_FILE not set"
+
+. ./common/cifs_test
+_cifs_test_init
+command -v python3 >/dev/null || _notrun "python3 required"
+_cifs_test_mount 'vers=3.1.1'
+_cifs_test_workspace "$CIFS_TEST_MNT"
+echo ioctl_test > "$CIFS_TEST_WORK/data" || _fail "create ioctl fixture"
+_cifs_test_ioctl_info "$CIFS_TEST_WORK/data" 0x311 >> "$seqres.full" 2>&1 || _fail "mount/tree information"
+
+python3 - "$CIFS_TEST_WORK/data" "$CIFS_TEST_WORK" >> "$seqres.full" 2>&1 <<'PY'
+import errno, fcntl, os, sys
+connections = []
+for path in sys.argv[1:]:
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        connection = bytearray(12)
+        fcntl.ioctl(descriptor, 0x800ccf0c, connection)
+        connections.append(connection)
+        try:
+            fcntl.ioctl(descriptor, 0x800ccf0c, 0)
+        except OSError as error:
+            assert error.errno == errno.EFAULT, error
+        else:
+            raise RuntimeError('NULL tree-info buffer accepted')
+        if path == sys.argv[2]:
+            try:
+                fcntl.ioctl(descriptor, 0x8040cf05, bytearray(64))
+            except OSError as error:
+                assert error.errno == errno.ENOTTY, error
+            else:
+                raise RuntimeError('directory unexpectedly supplied file mount info')
+    finally:
+        os.close(descriptor)
+assert connections[0] == connections[1], 'file and directory tree/session mismatch'
+PY
+[ "$?" -eq 0 ] || _fail "ioctl descriptor/buffer contract failed"
+
+echo "Silence is golden"
+status=0
+exit

@@ -1,0 +1,84 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-2.0
+#
+# CIFS: /proc/fs/cifs/traceSMB — toggle SMB packet tracing
+#
+# Behavior under test
+# - Read current traceSMB value (should be 0)
+# - Write 1 to enable SMB tracing → SMB PDU hex dumps in dmesg
+# - Do I/O to generate SMB traffic
+# - Record optional trace counts; verify I/O with tracing enabled
+# - Write 0 to disable
+# - Restore original
+#
+# Kernel code exercised
+#   traceSMB proc handler (via cifsFYI bit flags)
+
+. ./common/preamble
+. ./common/rc
+
+_begin_fstest auto quick
+
+[ "$FSTYP" = "cifs" ] || _notrun "requires CIFS"
+[ "$(id -u)" = 0 ] || _notrun "root required"
+[ -f /proc/fs/cifs/traceSMB ] || _notrun "traceSMB proc not available"
+[ -n "$TEST_DIR" ] || _notrun "TEST_DIR not set"
+
+. ./common/cifs_test
+_cifs_test_init
+_cifs_test_save_setting /proc/fs/cifs/traceSMB
+_cifs_test_workspace
+
+# ── Test 1: read current value ────────────────────────────────
+orig=$(cat /proc/fs/cifs/traceSMB)
+echo "test1: original traceSMB=$orig" >> "$seqres.full"
+echo "$orig" | grep -qE '^[0-9]+$' || _fail "unexpected format: '$orig'"
+
+# ── Test 2: enable tracing ───────────────────────────────────
+echo "test2: enable traceSMB=1" >> "$seqres.full"
+echo 1 > /proc/fs/cifs/traceSMB || _fail "enable traceSMB"
+val=$(cat /proc/fs/cifs/traceSMB)
+echo "test2: after write, traceSMB=$val" >> "$seqres.full"
+[ "$val" = "1" ] || _fail "traceSMB enable mismatch"
+
+# ── Test 3: generate SMB traffic ──────────────────────────────
+echo "test3: generate I/O" >> "$seqres.full"
+dmesg_before=$(dmesg | wc -l)
+
+echo "traceSMB-test" > "$CIFS_TEST_WORK/data" || _fail "write with packet tracing"
+[ "$(cat "$CIFS_TEST_WORK/data")" = traceSMB-test ] || _fail "read with packet tracing"
+unlink "$CIFS_TEST_WORK/data" || _fail "unlink with packet tracing"
+
+dmesg_after=$(dmesg | wc -l)
+new_lines=$((dmesg_after - dmesg_before))
+echo "test3: new dmesg lines=$new_lines" >> "$seqres.full"
+
+# With traceSMB=1, we should see hex dump lines in dmesg
+if [ $new_lines -gt 0 ]; then
+	# SMB trace shows hex dumps like "00000000: xx xx xx ..."
+	smb_trace=$(dmesg | tail -n "$new_lines" | grep -cE '[0-9a-f]{8}:' || true)
+	echo "test3: SMB trace hex lines=$smb_trace" >> "$seqres.full"
+fi
+
+# ── Test 4: disable tracing ──────────────────────────────────
+echo "test4: disable traceSMB=0" >> "$seqres.full"
+echo 0 > /proc/fs/cifs/traceSMB || _fail "disable traceSMB"
+val2=$(cat /proc/fs/cifs/traceSMB)
+[ "$val2" = 0 ] || _fail "traceSMB disable mismatch"
+echo "test4: after disable, traceSMB=$val2" >> "$seqres.full"
+
+# ── Test 5: restore original ─────────────────────────────────
+echo "$orig" > /proc/fs/cifs/traceSMB
+restored=$(cat /proc/fs/cifs/traceSMB)
+[ "$restored" = "$orig" ] || _fail "traceSMB restoration mismatch"
+echo "test5: restored=$restored (orig=$orig)" >> "$seqres.full"
+
+# No crash
+if dmesg | tail -5 | grep -qiE 'BUG:|kernel panic|Oops:'; then
+	_fail "kernel crash during traceSMB test"
+fi
+
+echo "traceSMB proc toggle OK"
+
+status=0
+exit

@@ -1,0 +1,66 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-2.0
+# CIFS: Ioctl correct paths — fsinfo, tcon_info, dump_full_key
+#
+# Kernel code exercised
+#   ioctl.c    (smb_mnt_get_fsinfo, smb_mnt_get_tcon_info,
+#               cifs_dump_full_key, cifs_ioctl)
+#   smb2ops.c  (smb3_enum_snapshots, smb2_dump_detail)
+
+. ./common/preamble
+. ./common/rc
+
+_begin_fstest auto quick
+
+[ "$FSTYP" = "cifs" ] || _notrun "requires CIFS"
+[ "$(id -u)" = 0 ] || _notrun "root required"
+[ -n "$TEST_DEV" ] || _notrun "TEST_DEV not set"
+[ -n "$CIFS_CRED_FILE" ] || _notrun "CIFS_CRED_FILE not set"
+command -v python3 >/dev/null 2>&1 || _notrun "python3 required"
+
+. ./common/cifs_test
+_cifs_test_init
+_cifs_test_mount 'vers=3.1.1,seal'
+_cifs_test_workspace "$CIFS_TEST_MNT"
+echo ioctl_test > "$CIFS_TEST_WORK/data" || _fail "create ioctl fixture"
+_cifs_test_ioctl_info "$CIFS_TEST_WORK/data" 0x311 >> "$seqres.full" 2>&1 || _fail "mount/tree information"
+
+python3 - "$CIFS_TEST_WORK/data" >> "$seqres.full" 2>&1 <<'PY'
+import errno, fcntl, os, struct, sys
+descriptor = os.open(sys.argv[1], os.O_RDONLY)
+buffer = bytearray(1024)
+try:
+    connection = bytearray(12)
+    fcntl.ioctl(descriptor, 0x800ccf0c, connection)
+    tree, session = struct.unpack('=IQ', connection)
+    small = bytearray(struct.pack('=IQHBBB', 17, 0, 0, 0, 0, 0))
+    try:
+        fcntl.ioctl(descriptor, 0xc011cf0a, small)
+    except OSError as error:
+        assert error.errno == errno.ENOBUFS, error
+    else:
+        raise RuntimeError('undersized key buffer accepted')
+    for requested_session in (0, session):
+        buffer[:] = bytes(len(buffer))
+        struct.pack_into('=IQHBBB', buffer, 0, len(buffer), requested_session, 0, 0, 0, 0)
+        fcntl.ioctl(descriptor, 0xc011cf0a, buffer)
+        size, returned_session, cipher, auth_length, in_length, out_length = struct.unpack_from('=IQHBBB', buffer)
+        assert returned_session == session, 'key session mismatch'
+        assert cipher in (1, 2, 3, 4), 'unknown encryption cipher'
+        expected_length = 16 if cipher in (1, 2) else 32
+        assert in_length == out_length == expected_length, 'cipher key length mismatch'
+        assert auth_length > 0 and 17 + auth_length + in_length + out_length <= size <= len(buffer)
+        start = 17
+        for length in (auth_length, in_length, out_length):
+            assert any(buffer[start:start+length]), 'empty key material'
+            start += length
+    print('Encrypted session key metadata and buffer sizing verified; keys not logged')
+finally:
+    buffer[:] = bytes(len(buffer))
+    os.close(descriptor)
+PY
+[ "$?" -eq 0 ] || _fail "full-key ioctl contract failed"
+
+echo "Silence is golden"
+status=0
+exit

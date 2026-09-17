@@ -1,0 +1,80 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-2.0
+#
+# CIFS: /proc/fs/cifs/cifsFYI — toggle debug tracing
+#
+# Behavior under test
+# - Read current cifsFYI value (should be 0 or small int)
+# - Write 1 to enable debug tracing
+# - Do some I/O to generate trace messages
+# - Exercise I/O while tracing is enabled; log optional debug output
+# - Write 0 to disable and verify the control value
+# - Restore original value
+#
+# Kernel code exercised
+#   cifsFYI_proc_show, cifsFYI_proc_write, cifsFYI_proc_open
+
+. ./common/preamble
+. ./common/rc
+
+_begin_fstest auto quick
+
+[ "$FSTYP" = "cifs" ] || _notrun "requires CIFS"
+[ "$(id -u)" = 0 ] || _notrun "root required"
+[ -f /proc/fs/cifs/cifsFYI ] || _notrun "cifsFYI proc not available"
+[ -n "$TEST_DIR" ] || _notrun "TEST_DIR not set"
+
+. ./common/cifs_test
+_cifs_test_init
+_cifs_test_save_setting /proc/fs/cifs/cifsFYI
+_cifs_test_workspace
+
+# ── Test 1: read current value ────────────────────────────────
+orig=$(cat /proc/fs/cifs/cifsFYI)
+echo "test1: original cifsFYI=$orig" >> "$seqres.full"
+# Should be a small integer
+echo "$orig" | grep -qE '^[0-9]+$' || _fail "cifsFYI unexpected format: '$orig'"
+
+# ── Test 2: enable tracing (write 1) ─────────────────────────
+echo "test2: enable cifsFYI=1" >> "$seqres.full"
+echo 1 > /proc/fs/cifs/cifsFYI || _fail "enable cifsFYI"
+val=$(cat /proc/fs/cifs/cifsFYI)
+echo "test2: after write, cifsFYI=$val" >> "$seqres.full"
+[ "$val" = "1" ] || _fail "cifsFYI readback mismatch"
+
+# ── Test 3: do I/O to trigger debug messages ──────────────────
+echo "test3: trigger debug output" >> "$seqres.full"
+dmesg_before=$(dmesg | wc -l)
+
+echo "cifsFYI-test-data" > "$CIFS_TEST_WORK/data" || _fail "write while tracing"
+[ "$(cat "$CIFS_TEST_WORK/data")" = cifsFYI-test-data ] || _fail "read while tracing"
+ls "$CIFS_TEST_WORK/" >> "$seqres.full" || _fail "readdir while tracing"
+unlink "$CIFS_TEST_WORK/data" || _fail "unlink while tracing"
+
+dmesg_after=$(dmesg | wc -l)
+new_lines=$((dmesg_after - dmesg_before))
+echo "test3: new dmesg lines=$new_lines" >> "$seqres.full"
+
+# With cifsFYI=1, we should see some CIFS debug messages
+if [ $new_lines -gt 0 ]; then
+	cifs_debug=$(dmesg | tail -n "$new_lines" | grep -ci 'CIFS' || true)
+	echo "test3: CIFS debug lines=$cifs_debug" >> "$seqres.full"
+fi
+
+# ── Test 4: disable tracing (write 0) ────────────────────────
+echo "test4: disable cifsFYI=0" >> "$seqres.full"
+echo 0 > /proc/fs/cifs/cifsFYI || _fail "disable cifsFYI"
+val2=$(cat /proc/fs/cifs/cifsFYI)
+[ "$val2" = 0 ] || _fail "cifsFYI disable mismatch"
+echo "test4: after disable, cifsFYI=$val2" >> "$seqres.full"
+
+# ── Test 5: restore original ─────────────────────────────────
+echo "$orig" > /proc/fs/cifs/cifsFYI
+restored=$(cat /proc/fs/cifs/cifsFYI)
+[ "$restored" = "$orig" ] || _fail "cifsFYI restoration mismatch"
+echo "test5: restored cifsFYI=$restored (orig=$orig)" >> "$seqres.full"
+
+echo "cifsFYI proc toggle OK"
+
+status=0
+exit

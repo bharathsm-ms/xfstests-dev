@@ -1,0 +1,62 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-2.0
+# CIFS: ioctl with invalid args — bad buffer sizes, wrong numbers, null
+# Exercises: ioctl.c command and user-pointer validation
+
+. ./common/preamble
+. ./common/rc
+_begin_fstest auto quick
+
+[ "$FSTYP" = "cifs" ] || _notrun "requires CIFS"
+[ "$(id -u)" = 0 ] || _notrun "root required"
+[ -n "$TEST_DIR" ] || _notrun "TEST_DIR not set"
+. ./common/cifs_test
+_cifs_test_init
+command -v python3 >/dev/null || _notrun "python3 required"
+_cifs_test_workspace
+
+F="$CIFS_TEST_WORK/data"
+echo "test" > "$F" || _fail "create ioctl fixture"
+dmesg_before=$(dmesg | wc -l)
+
+python3 -c "
+import errno, fcntl, os
+
+path = '$F'
+fd = os.open(path, os.O_RDONLY)
+
+def rejected(descriptor, command, argument, expected):
+    try:
+        fcntl.ioctl(descriptor, command, argument)
+    except OSError as error:
+        assert error.errno == expected, error
+    else:
+        raise RuntimeError('invalid ioctl unexpectedly succeeded')
+
+try:
+    rejected(fd, 0xcfff, bytearray(16), errno.ENOTTY)
+    for command in (0x8040cf05, 0x800ccf0c, 0xc018cf07):
+        rejected(fd, command, 0, errno.EFAULT)
+finally:
+    os.close(fd)
+
+dfd = os.open('$CIFS_TEST_WORK', os.O_RDONLY | os.O_DIRECTORY)
+try:
+    rejected(dfd, 0xcfff, bytearray(16), errno.ENOTTY)
+    rejected(dfd, 0x800ccf0c, 0, errno.EFAULT)
+finally:
+    os.close(dfd)
+
+print('done')
+" >> "$seqres.full" 2>&1 || _fail "invalid ioctl errno validation failed"
+
+dmesg_after=$(dmesg | wc -l)
+if [ $((dmesg_after - dmesg_before)) -gt 0 ]; then
+	dmesg | tail -n $((dmesg_after - dmesg_before)) | grep -qiE 'BUG:|panic|Oops:' && \
+		_fail "crash on invalid ioctl"
+fi
+
+unlink "$F" 2>/dev/null || true
+echo "invalid ioctl error paths OK"
+status=0
+exit

@@ -1,0 +1,31 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-2.0
+# CIFS: Credential-file errors must not pass as authenticated mounts
+
+. ./common/preamble
+. ./common/rc
+
+_begin_fstest auto quick
+
+[ "$FSTYP" = "cifs" ] || _notrun "requires CIFS"
+[ "$(id -u)" = 0 ] || _notrun "root required"
+[ -n "$TEST_DEV" ] || _notrun "TEST_DEV not set"
+[ -n "$CIFS_CRED_FILE" ] || _notrun "CIFS_CRED_FILE not set"
+
+. ./common/cifs_test
+_cifs_test_init
+_cifs_test_mount 'vers=3.1.1,sec=ntlmssp'
+_cifs_test_workspace "$CIFS_TEST_MNT"
+echo positive-control > "$CIFS_TEST_WORK/data" || _fail "positive-control write"
+[ "$(cat "$CIFS_TEST_WORK/data")" = positive-control ] || _fail "positive-control read"
+bad_credentials=$(mktemp "$tmp.credentials.XXXXXXXX") || _fail "mktemp dummy credentials"
+printf 'username=invalid-%s\npassword=invalid-fixture-password\n' \
+	"${CIFS_TEST_WORK##*/}" > "$bad_credentials" || _fail "write dummy credentials"
+_cifs_test_mount_rejected "credentials=$bad_credentials,vers=3.1.1,sec=ntlmssp" \
+	"$TEST_DEV" 'mount error\((1|13)\)'
+_cifs_test_mount_rejected "credentials=$tmp.credentials-missing,vers=3.1.1,sec=ntlmssp" \
+	"$TEST_DEV" 'opening credential file|No such file'
+
+echo "Silence is golden"
+status=0
+exit

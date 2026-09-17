@@ -1,0 +1,44 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-2.0
+# CIFS: Invalid mount options — error path coverage for fs_context.c
+# Exercises: smb3_parse_opt error paths, fs_context.c validation
+
+. ./common/preamble
+. ./common/rc
+_begin_fstest auto quick
+
+[ "$FSTYP" = "cifs" ] || _notrun "requires CIFS"
+[ "$(id -u)" = 0 ] || _notrun "root required"
+[ -n "$TEST_DEV" ] || _notrun "TEST_DEV not set"
+[ -n "$CIFS_CRED_FILE" ] || _notrun "CIFS_CRED_FILE not set"
+
+. ./common/cifs_test
+_cifs_test_init
+_cifs_test_mount 'vers=3.1.1'
+_cifs_test_workspace "$CIFS_TEST_MNT"
+echo positive-control > "$CIFS_TEST_WORK/data" || _fail "positive-control write"
+[ "$(cat "$CIFS_TEST_WORK/data")" = positive-control ] || _fail "positive-control read"
+
+# Test invalid options — each should fail cleanly
+for opts in \
+	"vers=9.9" \
+	"vers=0" \
+	"cache=bogus" \
+	"sec=invalid_auth" \
+	"rsize=notanumber" \
+	"wsize=notanumber" \
+	"actimeo=notanumber" \
+	"port=notanumber" \
+	"max_credits=notanumber" \
+	"closetimeo=notanumber" \
+	"echo_interval=notanumber" \
+	"snapshot=abc" \
+	"max_channels=notanumber"; do
+	echo "trying: $opts" >> "$seqres.full"
+	_cifs_test_mount_rejected "credentials=$CIFS_CRED_FILE,$opts" "$TEST_DEV" \
+		'bad|invalid|unknown|mount error\(22\)'
+done
+
+echo "invalid mount options error paths OK"
+status=0
+exit

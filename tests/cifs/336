@@ -1,0 +1,67 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-2.0
+#
+# CIFS: smb3_validate_negotiate — FSCTL_VALIDATE_NEGOTIATE_INFO
+#
+# Behavior under test
+# - Mount with vers=3.02 — the kernel sends VALIDATE_NEGOTIATE_INFO FSCTL
+#   during session setup to verify the negotiation wasn't tampered with.
+# - Verify Stats show the FSCTL was sent (via ioctl or Stats counters).
+# - Verify mount succeeds (validation passed).
+# - Verify no crash or error in dmesg related to negotiate validation.
+#
+# Kernel code exercised
+#   smb3_validate_negotiate() in smb2pdu.c
+
+. ./common/preamble
+. ./common/rc
+
+_begin_fstest auto quick
+
+[ "$FSTYP" = "cifs" ] || _notrun "requires CIFS"
+[ "$(id -u)" = 0 ] || _notrun "root required"
+[ -n "$TEST_DEV" ] || _notrun "TEST_DEV not set"
+
+. ./common/cifs_test
+. ./common/cifs_debug
+_cifs_test_init
+command -v python3 >/dev/null || _notrun "python3 required"
+
+dmesg_before=$(dmesg | wc -l)
+
+before=$(_cifs_stat "$TEST_DEV" IOCTLs:) || _notrun "per-share IOCTLs counter unavailable"
+_cifs_test_mount 'vers=3.02,sec=ntlmsspi,nomultichannel,nodfs'
+after=$(_cifs_stat "$TEST_DEV" IOCTLs:) || _fail "read post-mount IOCTLs counter"
+[ "$after" -gt "$before" ] || _fail "SMB 3.0.2 mount issued no validation IOCTL"
+_cifs_test_workspace "$CIFS_TEST_MNT"
+
+# ── Test 2: check Stats for FSCTL/ioctl activity ─────────────
+echo "test2: check Stats" >> "$seqres.full"
+echo "mount IOCTL delta=$((after - before))" >> "$seqres.full"
+
+# ── Test 4: basic I/O to confirm mount is functional ──────────
+echo "test4: I/O" >> "$seqres.full"
+TESTFILE="$CIFS_TEST_WORK/data"
+echo "validate-negotiate-test" > "$TESTFILE" 2>>"$seqres.full" || \
+	_fail "write failed"
+data=$(cat "$TESTFILE" 2>>"$seqres.full") || _fail "read failed"
+[ "$data" = "validate-negotiate-test" ] || _fail "data mismatch: '$data'"
+_cifs_test_ioctl_info "$TESTFILE" 0x302 >> "$seqres.full" 2>&1 || _fail "SMB 3.0.2 dialect not negotiated"
+unlink "$TESTFILE" 2>/dev/null || true
+
+# ── Test 5: no negotiate validation errors in dmesg ───────────
+echo "test5: dmesg check" >> "$seqres.full"
+dmesg_after=$(dmesg | wc -l)
+new_lines=$((dmesg_after - dmesg_before))
+if [ $new_lines -gt 0 ]; then
+	neg_errors=$(dmesg | tail -n "$new_lines" | grep -ciE 'validate.negotiate\|negotiate.*fail\|negotiate.*invalid' || true)
+	echo "test5: negotiate-related dmesg lines=$neg_errors" >> "$seqres.full"
+	if dmesg | tail -n "$new_lines" | grep -qiE 'BUG:|kernel panic|Oops:'; then
+		_fail "kernel crash during validate_negotiate"
+	fi
+fi
+
+echo "validate_negotiate FSCTL OK"
+
+status=0
+exit

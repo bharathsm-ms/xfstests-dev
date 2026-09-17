@@ -1,0 +1,29 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-2.0
+# CIFS: Missing share and malformed UNC rejection with a valid mount control
+
+. ./common/preamble
+. ./common/rc
+_begin_fstest auto quick
+
+[ "$FSTYP" = "cifs" ] || _notrun "requires CIFS"
+[ "$(id -u)" = 0 ] || _notrun "root required"
+[ -n "$CIFS_CRED_FILE" ] || _notrun "CIFS_CRED_FILE not set"
+
+. ./common/cifs_test
+_cifs_test_init
+_cifs_test_mount 'vers=3.1.1'
+_cifs_test_workspace "$CIFS_TEST_MNT"
+echo positive-control > "$CIFS_TEST_WORK/data" || _fail "positive-control write"
+[ "$(cat "$CIFS_TEST_WORK/data")" = positive-control ] || _fail "positive-control read"
+server=${TEST_DEV#//}
+server=${server%%/*}
+missing=${CIFS_TEST_WORK##*/}
+_cifs_test_mount_rejected "credentials=$CIFS_CRED_FILE,vers=3.1.1" \
+	"//$server/missing-$missing" 'mount error\((2|6|19)\)'
+_cifs_test_mount_rejected "credentials=$CIFS_CRED_FILE,vers=3.1.1" \
+	'not_a_unc_path' 'bad UNC|invalid|does not begin|not a valid'
+
+echo "mount error paths OK"
+status=0
+exit

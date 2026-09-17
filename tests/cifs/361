@@ -1,0 +1,48 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-2.0
+# CIFS: debug control value 7 and I/O while debugging is enabled
+
+. ./common/preamble
+. ./common/rc
+_begin_fstest auto quick
+
+[ "$FSTYP" = "cifs" ] || _notrun "requires CIFS"
+[ "$(id -u)" = 0 ] || _notrun "root required"
+[ -n "$TEST_DIR" ] || _notrun "TEST_DIR not set"
+[ -f /proc/fs/cifs/cifsFYI ] || _notrun "cifsFYI not available"
+. ./common/cifs_test
+. ./common/cifs_debug
+_cifs_test_init
+_cifs_test_save_setting /proc/fs/cifs/cifsFYI
+_cifs_test_workspace
+
+# Enable verbose debug
+orig=$(cat /proc/fs/cifs/cifsFYI)
+echo 7 > /proc/fs/cifs/cifsFYI || _fail "enable debugging"
+[ "$(cat /proc/fs/cifs/cifsFYI)" = 7 ] || _fail "debug readback mismatch"
+
+dmesg_before=$(dmesg | wc -l)
+
+# Do I/O to generate debug dump output
+F="$CIFS_TEST_WORK/data"
+echo "debug-dump-test" > "$F" || _fail "write with debugging"
+[ "$(cat "$F")" = debug-dump-test ] || _fail "read with debugging"
+stat "$F" >> "$seqres.full" 2>&1 || _fail "stat with debugging"
+ls "$CIFS_TEST_WORK/" >> "$seqres.full" || _fail "readdir with debugging"
+unlink "$F" || _fail "unlink with debugging"
+
+# Read only non-secret target session fields from DebugData
+share=$(_cifs_debug_share "$TEST_DEV") || _fail "parse DebugData"
+[ -n "$share" ] || _fail "target missing from DebugData"
+
+# Check dmesg for dump output
+dmesg_after=$(dmesg | wc -l)
+new_lines=$((dmesg_after - dmesg_before))
+echo "new dmesg lines: $new_lines" >> "$seqres.full"
+
+# Restore
+echo "$orig" > /proc/fs/cifs/cifsFYI || _fail "restore debugging"
+[ "$(cat /proc/fs/cifs/cifsFYI)" = "$orig" ] || _fail "debug restoration mismatch"
+echo "debug dump paths OK"
+status=0
+exit

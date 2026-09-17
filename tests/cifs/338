@@ -1,0 +1,106 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-2.0
+#
+# CIFS: /proc/fs/cifs/LookupCacheEnabled — toggle negative lookup cache
+#
+# Behavior under test
+# - Read current LookupCacheEnabled value
+# - With cache enabled (1), repeated negative lookups use fewer requests
+# - Disable (write 0): stat non-existent file → should always go to server
+# - Restore original value
+# - No crash on boundary writes
+#
+# Kernel code exercised
+#   cifs_lookup_cache_proc_show, cifs_lookup_cache_proc_write,
+#   cifs_lookup_cache_proc_open
+
+. ./common/preamble
+. ./common/rc
+
+_begin_fstest auto quick
+
+[ "$FSTYP" = "cifs" ] || _notrun "requires CIFS"
+[ "$(id -u)" = 0 ] || _notrun "root required"
+[ -f /proc/fs/cifs/LookupCacheEnabled ] || _notrun "LookupCacheEnabled proc not available"
+[ -n "$TEST_DIR" ] || _notrun "TEST_DIR not set"
+
+. ./common/cifs_test
+. ./common/cifs_debug
+_cifs_test_init
+_cifs_test_save_setting /proc/fs/cifs/LookupCacheEnabled
+_cifs_test_workspace
+command -v python3 >/dev/null || _notrun "python3 required"
+
+negative_lookups()
+{
+	python3 - "$1" >> "$seqres.full" 2>&1 <<'PY'
+import errno, os, sys
+for attempt in range(20):
+	try:
+		os.stat(sys.argv[1])
+	except OSError as error:
+		if error.errno != errno.ENOENT:
+			raise
+	else:
+		raise RuntimeError('negative lookup unexpectedly succeeded')
+PY
+}
+
+# ── Test 1: read current value ────────────────────────────────
+orig=$(cat /proc/fs/cifs/LookupCacheEnabled)
+echo "test1: original LookupCacheEnabled=$orig" >> "$seqres.full"
+echo "$orig" | grep -qE '^[0-9]+$' || _fail "unexpected format: '$orig'"
+
+# ── Test 2: enable (1) and test negative lookup ───────────────
+echo "test2: enable cache" >> "$seqres.full"
+echo 1 > /proc/fs/cifs/LookupCacheEnabled || _fail "enable lookup cache"
+val=$(cat /proc/fs/cifs/LookupCacheEnabled)
+[ "$val" = 1 ] || _fail "lookup cache enable mismatch"
+echo "test2: after write 1, val=$val" >> "$seqres.full"
+
+# Stat a non-existent file — should fail with ENOENT
+before=$(_cifs_stat "$TEST_DEV" Creates:) || _notrun "per-share Creates counter unavailable"
+negative_lookups "$CIFS_TEST_WORK/cached" || _fail "cached negative lookup"
+after=$(_cifs_stat "$TEST_DEV" Creates:) || _fail "read Creates counter"
+cached=$((after - before))
+echo "test2: negative lookup with cache=1 OK" >> "$seqres.full"
+
+# ── Test 3: disable (0) and test negative lookup ─────────────
+echo "test3: disable cache" >> "$seqres.full"
+echo 0 > /proc/fs/cifs/LookupCacheEnabled || _fail "disable lookup cache"
+val2=$(cat /proc/fs/cifs/LookupCacheEnabled)
+[ "$val2" = 0 ] || _fail "lookup cache disable mismatch"
+echo "test3: after write 0, val=$val2" >> "$seqres.full"
+
+before=$(_cifs_stat "$TEST_DEV" Creates:) || _fail "read Creates counter"
+negative_lookups "$CIFS_TEST_WORK/uncached" || _fail "uncached negative lookup"
+after=$(_cifs_stat "$TEST_DEV" Creates:) || _fail "read Creates counter"
+uncached=$((after - before))
+echo "negative lookup Creates: cached=$cached uncached=$uncached" >> "$seqres.full"
+[ "$cached" -ge 1 ] && [ "$uncached" -ge 20 ] && [ "$cached" -lt "$uncached" ] ||
+	_fail "LookupCacheEnabled did not reduce negative lookup requests"
+echo "test3: negative lookup with cache=0 OK" >> "$seqres.full"
+
+# ── Test 4: boundary writes ──────────────────────────────────
+echo "test4: boundary writes" >> "$seqres.full"
+for invalid in 99 garbage; do
+	if echo "$invalid" > /proc/fs/cifs/LookupCacheEnabled 2>>"$seqres.full"; then
+		[ "$(cat /proc/fs/cifs/LookupCacheEnabled)" = 0 ] || _fail "invalid write changed lookup cache"
+	fi
+done
+
+# ── Test 5: restore ──────────────────────────────────────────
+echo "$orig" > /proc/fs/cifs/LookupCacheEnabled
+restored=$(cat /proc/fs/cifs/LookupCacheEnabled)
+[ "$restored" = "$orig" ] || _fail "lookup cache restoration mismatch"
+echo "test5: restored=$restored (orig=$orig)" >> "$seqres.full"
+
+# No crash check
+if dmesg | tail -5 | grep -qiE 'BUG:|kernel panic|Oops:'; then
+	_fail "kernel crash during LookupCacheEnabled test"
+fi
+
+echo "LookupCacheEnabled proc toggle OK"
+
+status=0
+exit

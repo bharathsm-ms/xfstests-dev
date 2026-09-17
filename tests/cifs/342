@@ -1,0 +1,64 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-2.0
+#
+# CIFS: CIFS_IOC_GET_MNT_INFO + CIFS_QUERY_INFO deep ioctl coverage
+#
+# Behavior under test
+# - Use CIFS_IOC_GET_MNT_INFO ioctl to get mount info
+# - Use CIFS_QUERY_INFO ioctl with different info levels
+# - Verify no crash on invalid ioctl arguments
+#
+# Kernel code exercised
+#   ioctl.c (cifs_ioctl, smb_mnt_get_tcon_info, smb_mnt_get_fsinfo,
+#            cifs_ioctl_query_info)
+
+. ./common/preamble
+. ./common/rc
+
+_begin_fstest auto quick
+
+[ "$FSTYP" = "cifs" ] || _notrun "requires CIFS"
+[ "$(id -u)" = 0 ] || _notrun "root required"
+[ -n "$TEST_DIR" ] || _notrun "TEST_DIR not set"
+
+. ./common/cifs_test
+_cifs_test_init
+command -v python3 >/dev/null || _notrun "python3 required"
+command -v smbinfo >/dev/null || _notrun "smbinfo required for query-info coverage"
+_cifs_test_workspace
+
+TESTFILE="$CIFS_TEST_WORK/data"
+echo "ioctl-test" > "$TESTFILE" 2>>"$seqres.full" || _fail "create failed"
+
+# ── Test 1: CIFS_IOC_GET_MNT_INFO via Python ─────────────────
+echo "test1: CIFS_IOC_GET_MNT_INFO" >> "$seqres.full"
+_cifs_test_ioctl_info "$TESTFILE" >> "$seqres.full" 2>&1 || _fail "mount/tree info ioctl failed"
+
+# ── Test 2: smbinfo if available ──────────────────────────────
+echo "test2: smbinfo" >> "$seqres.full"
+for query in fileinternalinfo filebasicinfo filestandardinfo secdesc; do
+    smbinfo "$query" "$TESTFILE" > "$tmp.query" 2>> "$seqres.full" || _fail "$query failed"
+    [ -s "$tmp.query" ] || _fail "$query returned no data"
+    cat "$tmp.query" >> "$seqres.full"
+done
+
+# ── Test 3: invalid ioctl — no crash ─────────────────────────
+echo "test3: invalid ioctl" >> "$seqres.full"
+python3 -c "
+import errno, fcntl, os
+fd = os.open('$TESTFILE', os.O_RDONLY)
+try:
+    fcntl.ioctl(fd, 0xcf99, bytearray(16))
+except OSError as error:
+    assert error.errno == errno.ENOTTY, error
+else:
+    raise RuntimeError('unknown ioctl unexpectedly succeeded')
+os.close(fd)
+" >> "$seqres.full" 2>&1 || _fail "unknown ioctl was not rejected with ENOTTY"
+
+unlink "$TESTFILE" 2>/dev/null || true
+
+echo "CIFS ioctl deep coverage OK"
+
+status=0
+exit

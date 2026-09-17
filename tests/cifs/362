@@ -1,0 +1,46 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-2.0
+# CIFS: debug control value 4 and checked writes of varying sizes
+
+. ./common/preamble
+. ./common/rc
+_begin_fstest auto quick
+
+[ "$FSTYP" = "cifs" ] || _notrun "requires CIFS"
+[ "$(id -u)" = 0 ] || _notrun "root required"
+[ -n "$TEST_DIR" ] || _notrun "TEST_DIR not set"
+[ -f /proc/fs/cifs/cifsFYI ] || _notrun "cifsFYI not available"
+. ./common/cifs_test
+_cifs_test_init
+_cifs_test_save_setting /proc/fs/cifs/cifsFYI
+_cifs_test_workspace
+
+# Enable debug control bit 2
+orig=$(cat /proc/fs/cifs/cifsFYI)
+echo 4 > /proc/fs/cifs/cifsFYI || _fail "set debug control"
+[ "$(cat /proc/fs/cifs/cifsFYI)" = 4 ] || _fail "debug readback mismatch"
+
+dmesg_before=$(dmesg | wc -l)
+
+# Large write with debugging enabled
+F="$CIFS_TEST_WORK/data"
+dd if=/dev/urandom of="$tmp.expected" bs=1M count=4 status=none || _fail "prepare data"
+dd if="$tmp.expected" of="$F" bs=1M conv=fsync status=none || _fail "write"
+cmp "$tmp.expected" "$F" || _fail "read data mismatch"
+
+# Small writes with different sizes
+for sz in 1 512 4096 65536 1048576; do
+	dd if=/dev/urandom of="$tmp.expected" bs=$sz count=1 status=none || _fail "prepare data"
+	dd if="$tmp.expected" of="$F" bs=$sz conv=fsync status=none || _fail "small write"
+	cmp "$tmp.expected" "$F" || _fail "small write data mismatch"
+done
+
+dmesg_after=$(dmesg | wc -l)
+echo "detail dump dmesg lines: $((dmesg_after - dmesg_before))" >> "$seqres.full"
+
+echo "$orig" > /proc/fs/cifs/cifsFYI || _fail "restore debug control"
+[ "$(cat /proc/fs/cifs/cifsFYI)" = "$orig" ] || _fail "debug restoration mismatch"
+unlink "$F" 2>/dev/null || true
+echo "SMB2 detail dump OK"
+status=0
+exit
