@@ -1,0 +1,52 @@
+#! /bin/bash
+# SPDX-License-Identifier: GPL-2.0
+# Copyright (c) 2026 SUSE S.A.  All Rights Reserved.
+#
+# FS QA Test 796
+#
+# Test an i_size expanding fallocate into a range beyond current i_size that
+# already has a preallocated extent, with an unmount and mount after each
+# fallocate to verify that no metadata (i_size) and extents were lost.
+#
+. ./common/preamble
+_begin_fstest auto quick prealloc fiemap
+
+. ./common/punch # for _filter_fiemap
+
+_require_scratch
+_require_xfs_io_command "falloc" "-k"
+_require_xfs_io_command "fiemap"
+
+_fixed_by_fs_commit btrfs c562ba61fc5e \
+	"btrfs: fix incorrect i_size after remount caused by KEEP_SIZE prealloc gap"
+
+_scratch_mkfs >>$seqres.full 2>&1
+_scratch_mount
+
+# The fiemap results in the golden output requires file allocations to align to
+# 1M boundaries.
+_require_congruent_file_oplen $SCRATCH_MNT 1048576
+
+# Create our file with a size of 0 and a prealloc extent in the range [4M, 8M].
+$XFS_IO_PROG -f -c "falloc -k 4M 4M" $SCRATCH_MNT/foo
+
+# Unmount and mount again to remove any in memory state of the inode. We will
+# verify later that neither metadata nor extents were lost during unmount.
+_scratch_cycle_mount
+
+# Do an i_size expanding fallocate that overlaps the previous prealloc range
+# and extents past it. This increases the file size to 9M and allocates an
+# extent in the range [8M, 9M].
+$XFS_IO_PROG -c "falloc 7M 2M" $SCRATCH_MNT/foo
+
+# Unmount and mount again to remove any in memory state of the inode. We will
+# verify later that neither metadata nor extents were lost during unmount.
+_scratch_cycle_mount
+
+# File size should be 9M and we should have unwritten extents in range [4M, 9M].
+echo "File size after cycle mounts: $(stat -c %s $SCRATCH_MNT/foo)"
+echo "Fiemap output:"
+$XFS_IO_PROG -c "fiemap -v" $SCRATCH_MNT/foo | _filter_fiemap
+
+# Success, all done.
+_exit 0

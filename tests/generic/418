@@ -26,6 +26,13 @@ _require_block_device $TEST_DEV
 _require_test_program "dio-invalidate-cache"
 _require_test_program "feature"
 
+_cleanup()
+{
+	cd /
+	rm -f "$tmp.*"
+	rm -f "$testfile"
+}
+
 diotest=$here/src/dio-invalidate-cache
 testfile=$TEST_DIR/$seq-diotest
 sectorsize=`$here/src/min_dio_alignment $TEST_DIR $TEST_DEV`

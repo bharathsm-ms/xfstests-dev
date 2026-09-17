@@ -34,7 +34,7 @@ _do_mkfs()
 	for i in $*; do
 		echo -n "fssize=${i}g "
 		$MKFS_XFS_PROG -f -b size=4096 -l version=2 \
-			-d size=${i}g $loop_dev |grep log
+			-d size=${i}g $loop_dev $loop_mkfs_opts |grep log
 		_mount $loop_dev $LOOP_MNT
 		echo "test write" > $LOOP_MNT/test
 		_unmount $LOOP_MNT > /dev/null 2>&1
@@ -57,6 +57,10 @@ if [ $? -ne 0 ]; then
 fi
 
 loop_dev=$(_create_loop_device $LOOP_IMG)
+
+if _mkfs_xfs_supported $loop_mkfs_opts -l concurrency=0 -d concurrency=0 $loop_dev &>> $seqres.full; then
+	loop_mkfs_opts="$loop_mkfs_opts -l concurrency=0 -d concurrency=0"
+fi
 
 #
 # walk over "new" sizes supported by recent xfsprogs.

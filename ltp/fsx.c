@@ -40,6 +40,7 @@
 #include <liburing.h>
 #endif
 #include <sys/syscall.h>
+#include "statx.h"
 
 #ifndef MAP_FILE
 # define MAP_FILE 0
@@ -47,6 +48,10 @@
 
 #ifndef RWF_DONTCACHE
 #define RWF_DONTCACHE	0x80
+#endif
+
+#ifndef RWF_ATOMIC
+#define RWF_ATOMIC	0x40
 #endif
 
 #define NUMPRINTCOLUMNS 32	/* # columns of data to print on each line */
@@ -110,6 +115,7 @@ enum {
 	OP_READ_DONTCACHE,
 	OP_WRITE,
 	OP_WRITE_DONTCACHE,
+	OP_WRITE_ATOMIC,
 	OP_MAPREAD,
 	OP_MAPWRITE,
 	OP_MAX_LITE,
@@ -119,6 +125,7 @@ enum {
 	OP_FALLOCATE,
 	OP_PUNCH_HOLE,
 	OP_ZERO_RANGE,
+	OP_WRITE_ZEROES,
 	OP_COLLAPSE_RANGE,
 	OP_INSERT_RANGE,
 	OP_CLONE_RANGE,
@@ -183,6 +190,7 @@ int     keep_size_calls = 1;            /* -K flag disables */
 int     unshare_range_calls = 1;        /* -u flag disables */
 int     punch_hole_calls = 1;           /* -H flag disables */
 int     zero_range_calls = 1;           /* -z flag disables */
+int     write_zeroes_calls = 1;         /* -Y flag disables */
 int	collapse_range_calls = 1;	/* -C flag disables */
 int	insert_range_calls = 1;		/* -I flag disables */
 int	mapped_reads = 1;		/* -R flag disables it */
@@ -200,6 +208,11 @@ int	uring = 0;
 int	mark_nr = 0;
 int	dontcache_io = 1;
 int	hugepages = 0;                  /* -h flag */
+int	do_atomic_writes = 1;		/* -a flag disables */
+
+/* User for atomic writes */
+int awu_min = 0;
+int awu_max = 0;
 
 /* Stores info needed to periodically collapse hugepages */
 struct hugepages_collapse_info {
@@ -288,12 +301,14 @@ static const char *op_names[] = {
 	[OP_READ_DONTCACHE] = "read_dontcache",
 	[OP_WRITE] = "write",
 	[OP_WRITE_DONTCACHE] = "write_dontcache",
+	[OP_WRITE_ATOMIC] = "write_atomic",
 	[OP_MAPREAD] = "mapread",
 	[OP_MAPWRITE] = "mapwrite",
 	[OP_TRUNCATE] = "truncate",
 	[OP_FALLOCATE] = "fallocate",
 	[OP_PUNCH_HOLE] = "punch_hole",
 	[OP_ZERO_RANGE] = "zero_range",
+	[OP_WRITE_ZEROES] = "write_zeroes",
 	[OP_COLLAPSE_RANGE] = "collapse_range",
 	[OP_INSERT_RANGE] = "insert_range",
 	[OP_CLONE_RANGE] = "clone_range",
@@ -422,6 +437,7 @@ logdump(void)
 				prt("\t***RRRR***");
 			break;
 		case OP_WRITE_DONTCACHE:
+		case OP_WRITE_ATOMIC:
 		case OP_WRITE:
 			prt("WRITE    0x%x thru 0x%x\t(0x%x bytes)",
 			    lp->args[0], lp->args[0] + lp->args[1] - 1,
@@ -468,6 +484,13 @@ logdump(void)
 			break;
 		case OP_ZERO_RANGE:
 			prt("ZERO     0x%x thru 0x%x\t(0x%x bytes)",
+			    lp->args[0], lp->args[0] + lp->args[1] - 1,
+			    lp->args[1]);
+			if (overlap)
+				prt("\t******ZZZZ");
+			break;
+		case OP_WRITE_ZEROES:
+			prt("WZERO    0x%x thru 0x%x\t(0x%x bytes)",
 			    lp->args[0], lp->args[0] + lp->args[1] - 1,
 			    lp->args[1]);
 			if (overlap)
@@ -1073,6 +1096,25 @@ update_file_size(unsigned offset, unsigned size)
 	file_size = offset + size;
 }
 
+static int is_power_of_2(unsigned n) {
+	return ((n & (n - 1)) == 0);
+}
+
+/*
+ * Round down n to nearest power of 2.
+ * If n is already a power of 2, return n;
+ */
+static int rounddown_pow_of_2(int n) {
+	int i = 0;
+
+	if (is_power_of_2(n))
+		return n;
+
+	for (; (1 << i) < n; i++);
+
+	return 1 << (i - 1);
+}
+
 void
 dowrite(unsigned offset, unsigned size, int flags)
 {
@@ -1081,6 +1123,27 @@ dowrite(unsigned offset, unsigned size, int flags)
 	offset -= offset % writebdy;
 	if (o_direct)
 		size -= size % writebdy;
+	if (flags & RWF_ATOMIC) {
+		/* atomic write len must be between awu_min and awu_max */
+		if (size < awu_min)
+			size = awu_min;
+		if (size > awu_max)
+			size = awu_max;
+
+		/* atomic writes need power-of-2 sizes */
+		size = rounddown_pow_of_2(size);
+
+		/* atomic writes need naturally aligned offsets */
+		offset -= offset % size;
+
+		/* Skip the write if we are crossing max filesize */
+		if ((offset + size) > maxfilelen) {
+			if (!quiet && testcalls > simulatedopcount)
+				prt("skipping atomic write past maxfilelen\n");
+			log4(OP_WRITE_ATOMIC, offset, size, FL_SKIPPED);
+			return;
+		}
+	}
 	if (size == 0) {
 		if (!quiet && testcalls > simulatedopcount && !o_direct)
 			prt("skipping zero size write\n");
@@ -1088,7 +1151,10 @@ dowrite(unsigned offset, unsigned size, int flags)
 		return;
 	}
 
-	log4(OP_WRITE, offset, size, FL_NONE);
+	if (flags & RWF_ATOMIC)
+		log4(OP_WRITE_ATOMIC, offset, size, FL_NONE);
+	else
+		log4(OP_WRITE, offset, size, FL_NONE);
 
 	gendata(original_buf, good_buf, offset, size);
 	if (offset + size > file_size) {
@@ -1108,8 +1174,9 @@ dowrite(unsigned offset, unsigned size, int flags)
 		       (monitorstart == -1 ||
 			(offset + size > monitorstart &&
 			(monitorend == -1 || offset <= monitorend))))))
-		prt("%lld write\t0x%x thru\t0x%x\t(0x%x bytes)\tdontcache=%d\n", testcalls,
-		    offset, offset + size - 1, size, (flags & RWF_DONTCACHE) != 0);
+		prt("%lld write\t0x%x thru\t0x%x\t(0x%x bytes)\tdontcache=%d atomic_wr=%d\n", testcalls,
+		    offset, offset + size - 1, size, (flags & RWF_DONTCACHE) != 0,
+		    (flags & RWF_ATOMIC) != 0);
 	iret = fsxwrite(fd, good_buf + offset, size, offset, flags);
 	if (iret != size) {
 		if (iret == -1)
@@ -1351,6 +1418,59 @@ do_zero_range(unsigned offset, unsigned length, int keep_size)
 #else
 void
 do_zero_range(unsigned offset, unsigned length, int keep_size)
+{
+	return;
+}
+#endif
+
+#ifdef FALLOC_FL_WRITE_ZEROES
+void
+do_write_zeroes(unsigned offset, unsigned length)
+{
+	unsigned end_offset;
+	int mode = FALLOC_FL_WRITE_ZEROES;
+
+	if (length == 0) {
+		if (!quiet && testcalls > simulatedopcount)
+			prt("skipping zero length write zeroes\n");
+		log4(OP_WRITE_ZEROES, offset, length, FL_SKIPPED);
+		return;
+	}
+
+	end_offset = offset + length;
+
+	if (end_offset > biggest) {
+		biggest = end_offset;
+		if (!quiet && testcalls > simulatedopcount)
+			prt("write_zeroes to largest ever: 0x%x\n", end_offset);
+	}
+
+	log4(OP_WRITE_ZEROES, offset, length, FL_NONE);
+
+	if (end_offset > file_size)
+		update_file_size(offset, length);
+
+	if (testcalls <= simulatedopcount)
+		return;
+
+	if ((progressinterval && testcalls % progressinterval == 0) ||
+	    (debug && (monitorstart == -1 || monitorend == -1 ||
+		      end_offset <= monitorend))) {
+		prt("%lld wzero\tfrom 0x%x to 0x%x, (0x%x bytes)\n", testcalls,
+			offset, offset+length, length);
+	}
+	if (fallocate(fd, mode, (loff_t)offset, (loff_t)length) == -1) {
+		prt("write zeroes: 0x%x to 0x%x\n", offset, offset + length);
+		prterr("do_write_zeroes: fallocate");
+		report_failure(161);
+	}
+
+	memset(good_buf + offset, '\0', length);
+}
+
+#else
+void
+do_write_zeroes(unsigned offset, unsigned length)
 {
 	return;
 }
@@ -1784,6 +1904,38 @@ do_dedupe_range(unsigned offset, unsigned length, unsigned dest)
 	return;
 }
 #endif
+
+int test_atomic_writes(void) {
+	int ret;
+	struct statx stx;
+
+	if (o_direct != O_DIRECT) {
+		if (!quiet)
+			fprintf(stderr, "main: atomic writes need O_DIRECT (-Z), "
+					"disabling!\n");
+		return 0;
+	}
+
+	ret = xfstests_statx(AT_FDCWD, fname, 0, STATX_WRITE_ATOMIC, &stx);
+	if (ret < 0) {
+		fprintf(stderr, "main: Statx failed with %d."
+			" Failed to determine atomic write limits, "
+			" disabling!\n", ret);
+		return 0;
+	}
+
+	if (stx.stx_attributes & STATX_ATTR_WRITE_ATOMIC &&
+	    stx.stx_atomic_write_unit_min > 0) {
+		awu_min = stx.stx_atomic_write_unit_min;
+		awu_max = stx.stx_atomic_write_unit_max;
+		return 1;
+	}
+
+	if (!quiet)
+		fprintf(stderr, "main: IO Stack does not support "
+				"atomic writes, disabling!\n");
+	return 0;
+}
 
 #ifdef HAVE_COPY_FILE_RANGE
 int
@@ -2320,6 +2472,12 @@ have_op:
 			goto out;
 		}
 		break;
+	case OP_WRITE_ZEROES:
+		if (!write_zeroes_calls) {
+			log4(OP_WRITE_ZEROES, offset, size, FL_SKIPPED);
+			goto out;
+		}
+		break;
 	case OP_COLLAPSE_RANGE:
 		if (!collapse_range_calls) {
 			log4(OP_COLLAPSE_RANGE, offset, size, FL_SKIPPED);
@@ -2356,6 +2514,12 @@ have_op:
 			goto out;
 		}
 		break;
+	case OP_WRITE_ATOMIC:
+		if (!do_atomic_writes) {
+			log4(OP_WRITE_ATOMIC, offset, size, FL_SKIPPED);
+			goto out;
+		}
+		break;
 	}
 
 	switch (op) {
@@ -2385,6 +2549,11 @@ have_op:
 			dowrite(offset, size, 0);
 		break;
 
+	case OP_WRITE_ATOMIC:
+		TRIM_OFF_LEN(offset, size, maxfilelen);
+		dowrite(offset, size, RWF_ATOMIC);
+		break;
+
 	case OP_MAPREAD:
 		TRIM_OFF_LEN(offset, size, file_size);
 		domapread(offset, size);
@@ -2411,6 +2580,10 @@ have_op:
 	case OP_ZERO_RANGE:
 		TRIM_OFF_LEN(offset, size, maxfilelen);
 		do_zero_range(offset, size, keep_size);
+		break;
+	case OP_WRITE_ZEROES:
+		TRIM_OFF_LEN(offset, size, maxfilelen);
+		do_write_zeroes(offset, size);
 		break;
 	case OP_COLLAPSE_RANGE:
 		TRIM_OFF_LEN(offset, size, file_size - 1);
@@ -2511,13 +2684,14 @@ void
 usage(void)
 {
 	fprintf(stdout, "usage: %s",
-		"fsx [-dfhknqxyzBEFHIJKLORWXZ0]\n\
+		"fsx [-adfhknqxyzBEFHIJKLORWXZ0Y]\n\
 	   [-b opnum] [-c Prob] [-g filldata] [-i logdev] [-j logid]\n\
 	   [-l flen] [-m start:end] [-o oplen] [-p progressinterval]\n\
 	   [-r readbdy] [-s style] [-t truncbdy] [-w writebdy]\n\
 	   [-A|-U] [-D startingop] [-N numops] [-P dirpath] [-S seed]\n\
 	   [--replay-ops=opsfile] [--record-ops[=opsfile]] [--duration=seconds]\n\
 	   ... fname\n\
+	-a: disable atomic writes\n\
 	-b opnum: beginning operation number (default 1)\n\
 	-c P: 1 in P chance of file close+open at each op (default infinity)\n\
 	-d: debug output for all operations\n\
@@ -2561,6 +2735,9 @@ usage(void)
 #endif
 #ifdef FALLOC_FL_ZERO_RANGE
 "	-z: Do not use zero range calls\n"
+#endif
+#ifdef FALLOC_FL_WRITE_ZEROES
+"	-Y: Do not use write zeroes calls\n"
 #endif
 #ifdef FALLOC_FL_COLLAPSE_RANGE
 "	-C: Do not use collapse range calls\n"
@@ -3059,9 +3236,12 @@ main(int argc, char **argv)
 	setvbuf(stdout, (char *)0, _IOLBF, 0); /* line buffered stdout */
 
 	while ((ch = getopt_long(argc, argv,
-				 "0b:c:de:fg:hi:j:kl:m:no:p:qr:s:t:uw:xyABD:EFJKHzCILN:OP:RS:UWXZ",
+				 "0ab:c:de:fg:hi:j:kl:m:no:p:qr:s:t:uw:xyABD:EFJKHzCILN:TOP:RS:UWXZY",
 				 longopts, NULL)) != EOF)
 		switch (ch) {
+		case 'a':
+			do_atomic_writes = 0;
+			break;
 		case 'b':
 			simulatedopcount = getnum(optarg, &endp);
 			if (!quiet)
@@ -3203,6 +3383,9 @@ main(int argc, char **argv)
 		case 'z':
 			zero_range_calls = 0;
 			break;
+		case 'Y':
+			write_zeroes_calls = 0;
+			break;
 		case 'C':
 			collapse_range_calls = 0;
 			break;
@@ -3271,7 +3454,10 @@ main(int argc, char **argv)
 				exit(87);
 			}
 			duration = strtoll(optarg, NULL, 0);
-			if (duration < 1) {
+			if (duration == 0) {
+				/* No action is taken if duration is 0 */
+				exit(0);
+			} else if (duration < 0) {
 				fprintf(stderr, "%lld: invalid duration\n", duration);
 				exit(88);
 			}
@@ -3461,6 +3647,8 @@ main(int argc, char **argv)
 		punch_hole_calls = test_fallocate(FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE);
 	if (zero_range_calls)
 		zero_range_calls = test_fallocate(FALLOC_FL_ZERO_RANGE);
+	if (write_zeroes_calls)
+		write_zeroes_calls = test_fallocate(FALLOC_FL_WRITE_ZEROES);
 	if (collapse_range_calls)
 		collapse_range_calls = test_fallocate(FALLOC_FL_COLLAPSE_RANGE);
 	if (insert_range_calls)
@@ -3475,6 +3663,8 @@ main(int argc, char **argv)
 		exchange_range_calls = test_exchange_range();
 	if (dontcache_io)
 		dontcache_io = test_dontcache_io();
+	if (do_atomic_writes)
+		do_atomic_writes = test_atomic_writes();
 
 	while (keep_running())
 		if (!test())

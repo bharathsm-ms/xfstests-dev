@@ -39,6 +39,7 @@ dax			direct access mode for persistent memory files
 db			xfs_db functional tests
 dedupe			FIEDEDUPERANGE ioctl
 defrag			filesystem defragmenters
+dfs			SMB Distributed File System referrals and namespaces
 dir			directory test functions
 dump			dump and restore utilities
 eio			IO error reporting
@@ -119,6 +120,7 @@ samefs			overlayfs when all layers are on the same fs
 scrub			filesystem metadata scrubbers
 seed			btrfs seeded filesystems
 seek			llseek functionality
+selfhealing		self healing filesystem code
 selftest		tests with fixed results, used to validate testing setup
 send			btrfs send/receive
 shrinkfs		decreasing the size of a filesystem
@@ -143,7 +145,6 @@ union			tests from the unionmount test suite
 unlink			O_TMPFILE unlinked files
 unreliable_in_parallel	randomly fail when run in parallel with other tests
 unshare			fallocate FALLOC_FL_UNSHARE_RANGE
-v2log			XFS v2 log format tests
 verity			fsverity
 volume			btrfs volume management
 whiteout		overlayfs whiteout functionality

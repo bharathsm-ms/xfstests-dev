@@ -21,7 +21,7 @@ TARGETS = dirstress fill fill2 getpagesize holes lstat64 \
 	t_mmap_writev_overlap checkpoint_journal mmap-rw-fault allocstale \
 	t_mmap_cow_memory_failure fake-dump-rootino dio-buf-fault rewinddir-test \
 	readdir-while-renames dio-append-buf-fault dio-write-fsync-same-fd \
-	dio-writeback-race unlink-fsync
+	dio-writeback-race unlink-fsync truncate dio-read-into-mmap
 
 LINUX_TARGETS = xfsctl bstat t_mtab getdevicesize preallo_rw_pattern_reader \
 	preallo_rw_pattern_writer ftrunc trunc fs_perms testx looptest \
@@ -36,11 +36,12 @@ LINUX_TARGETS = xfsctl bstat t_mtab getdevicesize preallo_rw_pattern_reader \
 	fscrypt-crypt-util bulkstat_null_ocount splice-test chprojid_fail \
 	detached_mounts_propagation ext4_resize t_readdir_3 splice2pipe \
 	uuid_ioctl t_snapshot_deleted_subvolume fiemap-fault min_dio_alignment \
-	rw_hint
+	rw_hint btrfs_ioctl
 
 EXTRA_EXECS = dmerror fill2attr fill2fs fill2fs_check scaleread.sh \
 	      btrfs_crc32c_forged_name.py popdir.pl popattr.py \
-	      soak_duration.awk parse-dev-tree.awk parse-extent-tree.awk
+	      soak_duration.awk parse-dev-tree.awk parse-free-space.py \
+	      exfat_inject_vendor_ext.py exfat_verify_vendor_ext.py
 
 SUBDIRS = log-writes perf
 
@@ -60,6 +61,11 @@ endif
 
 ifeq ($(HAVE_FALLOCATE), true)
 LCFLAGS += -DHAVE_FALLOCATE
+endif
+
+ifeq ($(HAVE_FILE_GETATTR), yes)
+LINUX_TARGETS += file_attr
+LCFLAGS += -DHAVE_FILE_GETATTR
 endif
 
 ifeq ($(PKG_PLATFORM),linux)
@@ -100,6 +106,14 @@ endif
 
 ifeq ($(HAVE_FICLONE),yes)
      TARGETS += t_reflink_read_race
+endif
+
+ifeq ($(HAVE_FANOTIFY_FID),yes)
+     TARGETS += fs-monitor
+endif
+
+ifeq ($(HAVE_LIBBTRFSUTIL), true)
+     LINUX_TARGETS += t_btrfs_received_uuid_ioctl
 endif
 
 ifeq ($(NEED_INTERNAL_XFS_IOC_EXCHANGE_RANGE),yes)

@@ -1,0 +1,68 @@
+#! /bin/bash
+# SPDX-License-Identifier: GPL-2.0
+# Copyright (c) 2026 SUSE S.A.  All Rights Reserved.
+#
+# FS QA Test 348
+#
+# Basic function test for single-data-RAID56.
+#
+. ./common/preamble
+_begin_fstest auto raid
+
+# 3 disks for single-data-raid6, but one extra to make sure btrfs can still properly
+# convert to regular 4 disks raid6.
+_require_scratch_dev_pool 4
+_require_btrfs_raid_type raid5
+_require_btrfs_raid_type raid6
+_require_btrfs_forget_or_module_loadable
+
+# Make sure we have support RAID1C34 first
+if [ ! -f "/sys/fs/btrfs/features/raid1c34" ]; then
+	_notrun "no RAID1C34 support"
+fi
+
+common_workload()
+{
+	_scratch_mount
+	_run_fsx_on_file $FSX_AVOID "$SCRATCH_MNT/foobar" -q -N 10000 >> $seqres.full
+	_run_fsstress -w -n 10000 -d "$SCRATCH_MNT"
+	_scratch_unmount
+
+	# Mount each device degraded and run a scrub to exercise:
+	# - Regular data read
+	# - Data reconstruction read
+	# - P/Q scrub
+	for dev in $SCRATCH_DEV_POOL; do
+		_btrfs_forget_or_module_reload
+
+		_mount -o ro,degraded "$dev" "$SCRATCH_MNT"
+		_btrfs scrub start -Br "$SCRATCH_MNT"
+		_scratch_unmount
+	done
+
+	# Add a new device, balance all data, and re-scrub to make sure
+	# regular RAID56 is still working.
+	_btrfs_rescan_devices
+	_spare_dev_get
+	_scratch_mount
+	_btrfs device add -f "$SPARE_DEV" "$SCRATCH_MNT"
+	_btrfs balance start -d "$SCRATCH_MNT"
+	_btrfs scrub start -B "$SCRATCH_MNT"
+	_scratch_unmount
+	_spare_dev_put
+}
+
+_scratch_dev_pool_get 2
+# There will be a warning about single-data-RAID56, thus need
+# to redirect stderr
+_scratch_pool_mkfs -m raid1 -d raid5 >> $seqres.full 2>&1
+common_workload
+_scratch_dev_pool_put
+
+_scratch_dev_pool_get 3
+_scratch_pool_mkfs -m raid1c3 -d raid6 >> $seqres.full 2>&1
+common_workload
+_scratch_dev_pool_put
+
+echo "Silence is golden"
+_exit 0

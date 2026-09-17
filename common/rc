@@ -288,9 +288,26 @@ _get_hugepagesize()
 	awk '/Hugepagesize/ {print $2 * 1024}' /proc/meminfo
 }
 
+# Does dmesg have a --since flag?
+_has_dmesg_since_option()
+{
+	grep -q -- --since <(dmesg --help)
+}
+
 _mount()
 {
-    $MOUNT_PROG $*
+	$MOUNT_PROG "$@"
+	ret=$?
+	if [ "$ret" -ne 0 ]; then
+		echo "\"$MOUNT_PROG $*\" failed at $(date)" >> "$seqres.mountfail?"
+		if _has_dmesg_since_option; then
+			dmesg --since '30s ago' >> "$seqres.mountfail?"
+		else
+			dmesg | tail -n 100 >> "$seqres.mountfail?"
+		fi
+	fi
+
+	return $ret
 }
 
 # Call _mount to do mount operation but also save mountpoint to
@@ -619,7 +636,7 @@ _scratch_shutdown_and_syncfs()
 # requirement down to _require_scratch_shutdown.
 _require_xfs_io_shutdown()
 {
-	if [ _scratch_shutdown_handle != $SCRATCH_MNT ]; then
+	if [ $(_scratch_shutdown_handle) != $SCRATCH_MNT ]; then
 		# Most likely overlayfs
 		_notrun "xfs_io -c shutdown not supported on $FSTYP"
 	fi
@@ -875,6 +892,9 @@ _test_mkfs()
 	;;
     ext2|ext3|ext4)
 	$MKFS_PROG -t $FSTYP -- -F $MKFS_OPTIONS $* $TEST_DEV
+	;;
+    f2fs)
+	$MKFS_PROG -t $FSTYP -- -f $MKFS_OPTIONS $* $TEST_DEV
 	;;
     xfs)
 	_test_options mkfs
@@ -1895,6 +1915,16 @@ _fixed_by_kernel_commit()
 	_fixed_by_git_commit kernel $*
 }
 
+_fixed_by_fs_commit()
+{
+	local fstyp=$1
+	shift
+
+	if [ "$fstyp" = "$FSTYP" ]; then
+		_fixed_by_kernel_commit $*
+	fi
+}
+
 # Compare with _fixed_by_* helpers, this helper is used for test cases
 # are not regression tests, e.g. functional tests or maintainer tests,
 # this helper suggests git commits that should be applied to source trees
@@ -2375,6 +2405,17 @@ _require_no_large_scratch_dev()
 	_notrun "Large filesystem testing in progress, skipped this test"
 }
 
+# require an external realtime device (excludes the internal RT device)
+_require_external_realtime_device()
+{
+	if [ "$USE_EXTERNAL" != "yes" ]; then
+		_notrun "External volumes not in use, skipped this test"
+	fi
+	if [ "$SCRATCH_RTDEV" = "" ]; then
+		_notrun "Realtime device required, skipped this test"
+	fi
+}
+
 # this test requires that a realtime subvolume is in use, and
 # that the kernel supports realtime as well.
 #
@@ -2382,12 +2423,7 @@ _require_realtime()
 {
 	local zone_type=`_zone_type $SCRATCH_DEV`
 	if [ "${zone_type}" = "none" ]; then
-		if [ "$USE_EXTERNAL" != "yes" ]; then
-			_notrun "External volumes not in use, skipped this test"
-		fi
-		if [ "$SCRATCH_RTDEV" = "" ]; then
-			_notrun "Realtime device required, skipped this test"
-		fi
+		_require_external_realtime_device
 	fi
 }
 
@@ -2397,6 +2433,15 @@ _require_no_realtime()
 {
 	[ "$USE_EXTERNAL" = "yes" ] && [ -n "$SCRATCH_RTDEV" ] && \
 		_notrun "Test not compatible with realtime subvolumes, skipped this test"
+}
+
+# Disable usage of internal or external scratch devices
+_disable_scratch_realtime()
+{
+	unset SCRATCH_RTDEV
+	if [ "$FSTYP" = "xfs" ]; then
+		MKFS_OPTIONS="${MKFS_OPTIONS//-r zoned=1}"
+	fi
 }
 
 # this test requires that a specified command (executable) exists
@@ -2489,7 +2534,11 @@ __scratch_dev_has_dax()
 {
 	local sysfs="/sys/block/$(_short_dev $SCRATCH_DEV)"
 	test -e "${sysfs}/dax" && return 0
-	test "$(cat "${sysfs}/queue/dax" 2>/dev/null)" = "1" && return 0
+
+	local queue_path=$(_sysfs_queue_path $SCRATCH_DEV)
+	if [ $? -eq 0 ]; then
+		test "$(cat "${queue_path}/dax" 2>/dev/null)" = "1" && return 0
+	fi
 
 	return 1
 }
@@ -2549,10 +2598,10 @@ _zone_type()
 		echo "Usage: _zone_type <device>"
 		_exit 1
 	fi
-	local sdev=`_short_dev $target`
 
-	if [ -e /sys/block/${sdev}/queue/zoned ]; then
-		cat /sys/block/${sdev}/queue/zoned
+	local queue_path=$(_sysfs_queue_path $target)
+	if [ $? -eq 0 ] && [ -e "$queue_path/zoned" ]; then
+		cat "$queue_path/zoned"
 	else
 		echo none
 	fi
@@ -2974,7 +3023,7 @@ _require_xfs_io_command()
 		testio=`$XFS_IO_PROG -F -f -c "$command $param 0 1m" $testfile 2>&1`
 		param_checked="$param"
 		;;
-	"fpunch" | "fcollapse" | "zero" | "fzero" | "finsert" | "funshare")
+	"fpunch" | "fcollapse" | "zero" | "fzero" | "finsert" | "funshare" | "fwzero")
 		local blocksize=$(_get_file_block_size $TEST_DIR)
 		testio=`$XFS_IO_PROG -F -f -c "pwrite 0 $((5 * $blocksize))" \
 			-c "fsync" -c "$command $blocksize $((2 * $blocksize))" \
@@ -3010,8 +3059,18 @@ _require_xfs_io_command()
 		echo $testio | grep -q "Inappropriate ioctl" && \
 			_notrun "xfs_io $command support is missing"
 		;;
+	"healthmon")
+		test -z "$param" && param="-p"
+		testio=`$XFS_IO_PROG -c "healthmon $param" $TEST_DIR 2>&1`
+		param_checked="$param"
+		;;
 	"label")
 		testio=`$XFS_IO_PROG -c "label" $TEST_DIR 2>&1`
+		;;
+	"verifymedia")
+		testio=`$XFS_IO_PROG -x -c "verifymedia $* 0 0" 2>&1`
+		echo $testio | grep -q "invalid option" && \
+			_notrun "xfs_io $command support is missing"
 		;;
 	"open")
 		# -c "open $f" is broken in xfs_io <= 4.8. Along with the fix,
@@ -3027,16 +3086,24 @@ _require_xfs_io_command()
 	"pwrite")
 		# -N (RWF_NOWAIT) only works with direct vectored I/O writes
 		local pwrite_opts=" "
+		local write_size="4k"
 		if [ "$param" == "-N" ]; then
 			opts+=" -d"
-			pwrite_opts+="-V 1 -b 4k"
+			pwrite_opts+="-V 1 -b $write_size"
 		fi
 		if [ "$param" == "-A" ]; then
 			opts+=" -d"
-			pwrite_opts+="-V 1 -b 4k"
+			# try to write the minimum supported atomic write size
+			write_size="$($XFS_IO_PROG -f -c "statx -r -m $STATX_WRITE_ATOMIC" $testfile 2>/dev/null | \
+				grep atomic_write_unit_min | \
+				grep -o '[0-9]\+')"
+			if [ -z "$write_size" ] || [ "$write_size" = "0" ]; then
+				write_size="0 --not-supported"
+			fi
+			pwrite_opts+="-V 1 -b $write_size"
 		fi
 		testio=`$XFS_IO_PROG -f $opts -c \
-		        "pwrite $pwrite_opts $param 0 4k" $testfile 2>&1`
+		        "pwrite $pwrite_opts $param 0 $write_size" $testfile 2>&1`
 		param_checked="$pwrite_opts $param"
 		;;
 	"scrub"|"repair")
@@ -3069,6 +3136,11 @@ _require_xfs_io_command()
 			_notrun "xfs_io $command $param kernel support is missing"
 		rm -f $testfile.1
 		param_checked="$param"
+		;;
+	"shutdown")
+		testio=$($XFS_IO_PROG -f -x -c "$command $param" $testfile 2>&1)
+		param_checked="$param"
+		_test_cycle_mount
 		;;
 	"utimes" )
 		testio=`$XFS_IO_PROG -f -c "utimes 0 0 0 0" $testfile 2>&1`
@@ -3563,50 +3635,6 @@ _check_generic_filesystem()
     return 0
 }
 
-_check_f2fs_filesystem()
-{
-    local device=$1
-
-    # If type is set, we're mounted
-    local type=`_fs_type $device`
-    local ok=1
-
-    if [ "$type" = "f2fs" ]
-    then
-        # mounted ...
-        local mountpoint=`_umount_or_remount_ro $device`
-    fi
-
-    $F2FS_FSCK_PROG --dry-run $device >$tmp.fsck.f2fs 2>&1
-    if [ $? -ne 0 ];then
-        _log_err "_check_f2fs_filesystem: filesystem on $device is inconsistent"
-        echo "*** fsck.f2fs output ***" >>$seqres.full
-        cat $tmp.fsck.f2fs              >>$seqres.full
-        echo "*** end fsck.f2fs output" >>$seqres.full
-
-    ok=0
-    fi
-    rm -f $tmp.fsck.f2fs
-
-    if [ $ok -eq 0 ]
-    then
-        echo "*** mount output ***"		>>$seqres.full
-        _mount					>>$seqres.full
-        echo "*** end mount output"		>>$seqres.full
-    elif [ "$type" = "f2fs" ]
-    then
-	# was mounted ...
-	_mount_or_remount_rw "$MOUNT_OPTIONS" $device $mountpoint
-	ok=$?
-    fi
-
-    if [ $ok -eq 0 ]; then
-	return 1
-    fi
-
-    return 0
-}
-
 # Filter the knowen errors the UDF Verifier reports.
 _udf_test_known_error_filter()
 {
@@ -3720,14 +3748,14 @@ _check_test_fs()
     esac
 }
 
-_check_scratch_fs()
+# check the file system passed in as $1
+_check_dev_fs()
 {
-    local device=$SCRATCH_DEV
-    [ $# -eq 1 ] && device=$1
+    local device=$1
 
     case $FSTYP in
     xfs)
-	_check_xfs_scratch_fs $device
+	_check_xfs_filesystem $device "none" "none"
 	;;
     udf)
 	_check_udf_filesystem $device $udf_fsize
@@ -3777,6 +3805,19 @@ _check_scratch_fs()
 	_check_generic_filesystem $device
 	;;
     esac
+}
+
+# check the scratch file system
+_check_scratch_fs()
+{
+	case $FSTYP in
+	xfs)
+		_check_xfs_scratch_fs $SCRATCH_DEV
+		;;
+	*)
+		_check_dev_fs $SCRATCH_DEV
+		;;
+	esac
 }
 
 _full_fstyp_details()
@@ -3853,6 +3894,7 @@ _link_out_file_named()
 		' <$seqfull.cfg)
 	rm -f $1 || _fail "_link_out_file_named: failed to remove existing output file"
 	ln -fs $(basename $1).$suffix $1 || _fail "$(basename $1).$suffix: could not setup output file"
+	test -r $1 || _fail "$(basename $1).$suffix: output file for feature set \"$2\" not found"
 }
 
 _link_out_file()
@@ -4152,6 +4194,28 @@ _require_scratch_shutdown_and_syncfs()
 	_require_scratch_shutdown
 }
 
+# Require that the mounted filesystem survive data write errors long enough to
+# report them through the regular error reporting path.
+_require_fs_survives_data_write_eio()
+{
+	local dev=$1
+
+	if [ ! -b "$dev" ]; then
+		_fail "Usage: _require_fs_survives_data_write_eio <mounted_device>"
+	fi
+
+	case "$FSTYP" in
+	xfs)
+		# This is an XFS per-mount sysfs attribute, not a block queue
+		# attribute.  Its existence means XFS mounted this instance with
+		# zoned filesystem semantics.
+		if _has_fs_sysfs_attr "$dev" "zoned/max_open_zones"; then
+			_notrun "zoned XFS shuts down on data write EIO"
+		fi
+		;;
+	esac
+}
+
 _check_s_dax()
 {
 	local target=$1
@@ -4294,7 +4358,7 @@ _has_metadata_journaling()
 	fi
 
 	case "$FSTYP" in
-	ext2|vfat|msdos|udf|exfat|tmpfs)
+	ext2|vfat|msdos|udf|exfat|tmpfs|hfs|hfsplus)
 		echo "$FSTYP does not support metadata journaling"
 		return 1
 		;;
@@ -4550,7 +4614,7 @@ _require_atime()
 	nfs|afs|cifs|virtiofs)
 		_notrun "atime related mount options have no effect on $FSTYP"
 		;;
-	ceph|ceph-fuse)
+	ceph|ceph-fuse|hfs)
 		_notrun "atime not maintained by $FSTYP"
 		;;
 	esac
@@ -4577,11 +4641,13 @@ _create_loop_device()
 {
 	local file="$1"
 	local blksize="$2"
+	local sizelimit="$3"
 	local dev
 	local dio_args="--direct-io=on"
 	local args
 
 	test -n "$blksize" && args="--sector-size=$blksize"
+	test -n "$sizelimit" && args+=" --sizelimit=$sizelimit"
 
 	# Try to enable asynchronous directio mode on the loopback device so
 	# that writeback started by a filesystem mounted on the loop device
@@ -4593,6 +4659,9 @@ _create_loop_device()
 	# size to the directio alignment of the underlying fs, so if we want to
 	# use our own sector size, we need to specify that at creation time.
 	if ! dev="$(losetup $dio_args $args -f --show $file 2>/dev/null)"; then
+		# losetup can return error for certain configuration settings
+		# but still create a loop device.
+		test -n "$dev" && losetup -d "$dev" > /dev/null 2>&1
 		dev="$(losetup $args -f --show $file)" || \
 			_fail "Cannot assign $file to a loop device ($args)"
 	fi
@@ -4614,7 +4683,8 @@ _create_loop_device_like_bdev()
 
 	blksize="$(blockdev --getss "$bdev")"
 
-	_create_loop_device "$file" "$blksize"
+	shift 2
+	_create_loop_device "$file" "$blksize" "$@"
 }
 
 _destroy_loop_device()
@@ -4681,9 +4751,20 @@ _require_test_fcntl_setlease()
 	touch $TEST_DIR/setlease_testfile
 	$here/src/locktest -t $TEST_DIR/setlease_testfile >/dev/null 2>&1
 	local ret=$?
+	rm -f $TEST_DIR/setlease_testfile
 	[ $ret -eq 22 ] && _notrun "Require fcntl setlease support"
 	[ "$FSTYP" == "nfs" -a $ret -eq 11 ] && \
 		_notrun "NFS requires delegation before setlease"
+}
+
+_require_test_fcntl_setdeleg()
+{
+	_require_test_program "locktest"
+	mkdir $TEST_DIR/setdeleg_testdir
+	$here/src/locktest -t -D $TEST_DIR/setdeleg_testdir >/dev/null 2>&1
+	local ret=$?
+	rm -rf $TEST_DIR/setdeleg_testdir
+	[ $ret -eq 22 ] && _notrun "Require fcntl setdeleg support"
 }
 
 _require_ofd_locks()
@@ -5026,6 +5107,50 @@ _check_kmemleak()
 	fi
 }
 
+# Current timestamp, in a format that systemd likes
+_systemd_now() {
+	timedatectl show --property=TimeUSec --value
+}
+
+# Do what we need to do to capture core dumps from coredumpctl
+_start_coredumpctl_collection() {
+	command -v coredumpctl &>/dev/null || return
+	command -v timedatectl &>/dev/null || return
+	command -v jq &>/dev/null || return
+
+	sysctl kernel.core_pattern | grep -q systemd-coredump || return
+	COREDUMPCTL_START_TIMESTAMP="$(_systemd_now)"
+}
+
+# Capture core dumps from coredumpctl.
+#
+# coredumpctl list only supports json output as a machine-readable format.  The
+# human-readable format intermingles spaces from the timestamp with actual
+# column separators, so we cannot parse that sanely.  The json output is an
+# array of:
+#        {
+#                "time" : 1749744847150926,
+#                "pid" : 2297,
+#                "uid" : 0,
+#                "gid" : 0,
+#                "sig" : 6,
+#                "corefile" : "present",
+#                "exe" : "/run/fstests/e2fsprogs/fuse2fs",
+#                "size" : 47245
+#        },
+# So we use jq to filter out lost corefiles, then print the pid and exe
+# separated by a pipe and hope that nobody ever puts a pipe in an executable
+# name.
+_finish_coredumpctl_collection() {
+	test -n "$COREDUMPCTL_START_TIMESTAMP" || return
+
+	coredumpctl list --since="$COREDUMPCTL_START_TIMESTAMP" --json=short 2>/dev/null | \
+	jq --raw-output 'map(select(.corefile == "present")) | map("\(.pid)|\(.exe)") | .[]' | while IFS='|' read pid exe; do
+		test -e "core.$pid" || coredumpctl dump --output="core.$pid" "$pid" "$exe" &>> $seqres.full
+	done
+	unset COREDUMPCTL_START_TIMESTAMP
+}
+
 # don't check dmesg log after test
 _disable_dmesg_check()
 {
@@ -5106,6 +5231,30 @@ _sysfs_dev()
 	maj=$(echo "ibase=16; $maj" | bc)
 	min=$(echo "ibase=16; $min" | bc)
 	echo /sys/dev/block/$maj:$min
+}
+
+# Get the sysfs queue path for a block device, handling partitions correctly.
+_sysfs_queue_path()
+{
+	local dev parent
+	dev=$(_short_dev "$1")
+
+	# For partitions, queue details are in the parent device's sysfs dir
+	if [ -e "/sys/class/block/$dev/partition" ]; then
+		parent=$(basename "$(readlink -f /sys/class/block/$dev/..)")
+	else
+		parent="$dev"
+	fi
+
+	local queue_path="/sys/block/$parent/queue"
+
+	# Verify the path exists before returning
+	if [ -e "$queue_path" ]; then
+		echo "$queue_path"
+		return 0
+	else
+		return 1
+	fi
 }
 
 # Get the minimum block size of a file.  Usually this is the
@@ -5200,13 +5349,24 @@ _require_hugepage_fsx()
 		_notrun "fsx binary does not support MADV_COLLAPSE"
 }
 
-_run_fsx()
+_run_fsx_on_file()
 {
+	local testfile=$1
+	shift
+
+	if ! [ -f $testfile ]
+	then
+		echo "_run_fsx_on_file: $testfile doesn't exist. Creating" >> $seqres.full
+		touch $testfile
+	fi
+
 	echo "fsx $*"
 	local args=`echo $@ | sed -e "s/ BSIZE / $bsize /g" -e "s/ PSIZE / $psize /g"`
-	set -- $FSX_PROG $args $FSX_AVOID $TEST_DIR/junk
+
+	set -- $FSX_PROG $args $FSX_AVOID $testfile
+
 	echo "$@" >>$seqres.full
-	rm -f $TEST_DIR/junk
+	rm -f $testfile
 	"$@" 2>&1 | tee -a $seqres.full >$tmp.fsx
 	local res=${PIPESTATUS[0]}
 	if [ $res -ne 0 ]; then
@@ -5216,6 +5376,12 @@ _run_fsx()
 	fi
 	rm -f $tmp.fsx
 	return 0
+}
+
+_run_fsx()
+{
+	_run_fsx_on_file $TEST_DIR/junk $@
+	return $?
 }
 
 # Run fsx with -h(ugepage buffers).  If we can't set up a hugepage then skip
@@ -5483,7 +5649,7 @@ _udev_wait()
 	if [ -z "$UDEV_WAIT_PROG" ]; then
 		$UDEV_SETTLE_PROG >/dev/null 2>&1
 	else
-		$UDEV_WAIT_PROG $args
+		$UDEV_WAIT_PROG --timeout 60 $args
 	fi
 }
 
@@ -5975,6 +6141,155 @@ _require_inplace_writes()
 	fi
 }
 
+_min() {
+	local ret
+
+	for arg in "$@"; do
+		if [ -z "$ret" ] || (( $arg < $ret )); then
+			ret="$arg"
+		fi
+	done
+	echo $ret
+}
+
+_max() {
+	local ret
+
+	for arg in "$@"; do
+		if [ -z "$ret" ] || (( $arg > $ret )); then
+			ret="$arg"
+		fi
+	done
+	echo $ret
+}
+
+# Due to reasons explained in fio commit 40f1fc11d, fio version between
+# v3.33 and v3.38 have atomic= feature but it is a no-op and doesn't do
+# RWF_ATOMIC write. Hence, use this helper to ensure fio has the
+# required support. Currently, the simplest way we have is to ensure
+# the version.
+_require_fio_atomic_writes() {
+	__require_fio_version "3.38+"
+}
+
+# Check the required fio version. Examples:
+#   __require_fio_version 3.38 (matches 3.38 only)
+#   __require_fio_version 3.38+ (matches 3.38 and above)
+#   __require_fio_version 3.38- (matches 3.38 and below)
+#
+# Internal helper, avoid using directly in tests.
+__require_fio_version() {
+	local req_ver="$1"
+	local fio_ver
+
+	_require_fio
+	_require_math
+
+	fio_ver=$(fio -v | cut -d"-" -f2)
+
+	case "$req_ver" in
+	*+)
+		req_ver=${req_ver%+}
+		test $(_math "$fio_ver >= $req_ver") -eq 1 || \
+			_notrun "need fio >= $req_ver (found $fio_ver)"
+		;;
+	*-)
+		req_ver=${req_ver%-}
+		test $(_math "$fio_ver <= $req_ver") -eq 1 || \
+			_notrun "need fio <= $req_ver (found $fio_ver)"
+		;;
+	*)
+		req_ver=${req_ver%-}
+		test $(_math "$fio_ver == $req_ver") -eq 1 || \
+			_notrun "need fio = $req_ver (found $fio_ver)"
+		;;
+	esac
+}
+
+# Require filesystem to support file_getattr()/file_setattr() syscalls on
+# regular files
+_require_file_attr()
+{
+	local test_file="$TEST_DIR/foo"
+	touch $test_file
+
+	$here/src/file_attr --set --set-nodump $TEST_DIR ./foo &>/dev/null
+	rc=$?
+	rm -f "$test_file"
+
+	if [ $rc -ne 0 ]; then
+		_notrun "file_getattr not supported for regular files on $FSTYP"
+	fi
+}
+
+# Require filesystem to support file_getattr()/file_setattr() syscalls on
+# special files (chardev, fifo...)
+_require_file_attr_special()
+{
+	local test_file="$TEST_DIR/fifo"
+	mkfifo $test_file
+
+	$here/src/file_attr --set --set-nodump $TEST_DIR ./fifo &>/dev/null
+	rc=$?
+	rm -f "$test_file"
+
+	if [ $rc -ne 0 ]; then
+		_notrun "file_getattr not supported for special files on $FSTYP"
+	fi
+}
+
+# Require filesystem to accomodate enough blocks in a file
+_require_max_file_range_blocks()
+{
+	local blocks=$1
+
+	case $FSTYP in
+	f2fs)
+		if [ $blocks -gt 1057053439 ]; then
+			_notrun "$blocks blocks per file not supported on $FSTYP"
+		fi
+		;;
+	*)
+		;;
+	esac
+}
+
+_require_fanotify_ioerrors()
+{
+	local x
+
+	case "$FSTYP" in
+	xfs)
+		# added as a part of xfs health monitoring
+		_require_xfs_io_command healthmon
+		return 0
+		;;
+	ext4)
+		# added at the same time as err_report_sec
+		x="$(_get_fs_sysfs_attr $TEST_DEV err_report_sec)"
+		test -n "$x" && return 0
+		;;
+	f2fs)
+		local feat_file="/sys/fs/f2fs/features/fserror"
+		if [ -f "$feat_file" ] && [ "$(cat "$feat_file")" = "supported" ]; then
+			return 0
+		fi
+		;;
+	esac
+
+	_notrun "$FSTYP does not support fanotify ioerrors"
+}
+
+# Computes a percentage of the available space in a filesystem and
+# returns that quantity in MB. The percentage must not contain a percent
+# sign ("%").
+# usage example:
+# _mb_pct_of_available_space <mount point> <percent>
+#
+_mb_pct_of_available_space()
+{
+        _df_device $1 | $AWK_PROG -v pct=$2 '{printf "%.f", (($5*(pct/100))/1024)}'
+}
 ################################################################################
 # make sure this script returns success
 /bin/true

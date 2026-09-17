@@ -10,6 +10,13 @@
 . ./common/preamble
 _begin_fstest auto quick
 
+_cleanup()
+{
+	cd /
+	rm -f "$tmp.*"
+	rm -f "$TEST_DIR/dio-append-buf-fault"
+}
+
 # NFS forbade open with O_APPEND|O_DIRECT
 _exclude_fs nfs
 
@@ -17,8 +24,7 @@ _require_test
 _require_odirect
 _require_test_program dio-append-buf-fault
 
-[ $FSTYP == "btrfs" ] && \
-	_fixed_by_kernel_commit 939b656bc8ab \
+_fixed_by_fs_commit btrfs 939b656bc8ab \
 	"btrfs: fix corruption after buffer fault in during direct IO append write"
 
 # On error the test program writes messages to stderr, causing a golden output

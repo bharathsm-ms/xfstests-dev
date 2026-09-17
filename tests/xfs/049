@@ -21,7 +21,7 @@ _cleanup()
 
 	if [ -w $seqres.full ]; then
 		echo "--- mounts at end (after cleanup)" >> $seqres.full
-		mount >> $seqres.full
+		_mount >> $seqres.full
 	fi
 }
 
@@ -47,18 +47,20 @@ echo "(dev=$SCRATCH_DEV, mount=$SCRATCH_MNT)" >> $seqres.full
 echo "" >> $seqres.full
 
 echo "--- mounts" >> $seqres.full
-mount >> $seqres.full
+_mount >> $seqres.full
 
 _log "Create ext2 fs on scratch"
 mkfs -t ext2 -F $SCRATCH_DEV >> $seqres.full 2>&1 \
     || _fail "!!! failed to mkfs ext2"
 
 _log "Mount ext2 fs on scratch"
-mount -t ext2 $SCRATCH_DEV $SCRATCH_MNT >> $seqres.full 2>&1 \
+_mount -t ext2 $SCRATCH_DEV $SCRATCH_MNT >> $seqres.full 2>&1 \
     || _fail "!!! failed to mount"
 
 _log "Create xfs fs in file on scratch"
-${MKFS_XFS_PROG} -f -dfile,name=$SCRATCH_MNT/test.xfs,size=40m \
+truncate -s 40m $SCRATCH_MNT/test.xfs
+loop_dev1=$(_create_loop_device $SCRATCH_MNT/test.xfs)
+${MKFS_XFS_PROG} -f $loop_dev1 \
     >> $seqres.full 2>&1 \
     || _fail "!!! failed to mkfs xfs"
 
@@ -67,7 +69,6 @@ mkdir $SCRATCH_MNT/test $SCRATCH_MNT/test2 >> $seqres.full 2>&1 \
     || _fail "!!! failed to make mount points"
 
 _log "Mount xfs via loop"
-loop_dev1=$(_create_loop_device $SCRATCH_MNT/test.xfs)
 _mount $loop_dev1 $SCRATCH_MNT/test >> $seqres.full 2>&1 \
     || _fail "!!! failed to loop mount xfs"
 
@@ -113,7 +114,7 @@ _destroy_loop_device $loop_dev1
 unset loop_dev1
 
 echo "--- mounts at end (before cleanup)" >> $seqres.full
-mount >> $seqres.full
+_mount >> $seqres.full
 
 # success, all done
 status=0

@@ -124,6 +124,7 @@ typedef enum {
 	OP_MWRITE,
 	OP_PUNCH,
 	OP_ZERO,
+	OP_WRITE_ZEROES,
 	OP_COLLAPSE,
 	OP_INSERT,
 	OP_READ,
@@ -257,6 +258,7 @@ void	mread_f(opnum_t, long);
 void	mwrite_f(opnum_t, long);
 void	punch_f(opnum_t, long);
 void	zero_f(opnum_t, long);
+void	write_zeroes_f(opnum_t, long);
 void	collapse_f(opnum_t, long);
 void	insert_f(opnum_t, long);
 void	unshare_f(opnum_t, long);
@@ -326,6 +328,7 @@ struct opdesc	ops[OP_LAST]	= {
 	[OP_MWRITE]	   = {"mwrite",	       mwrite_f,	2, 1 },
 	[OP_PUNCH]	   = {"punch",	       punch_f,		1, 1 },
 	[OP_ZERO]	   = {"zero",	       zero_f,		1, 1 },
+	[OP_WRITE_ZEROES]  = {"write_zeroes",  write_zeroes_f,	1, 1 },
 	[OP_COLLAPSE]	   = {"collapse",      collapse_f,	1, 1 },
 	[OP_INSERT]	   = {"insert",	       insert_f,	1, 1 },
 	[OP_READ]	   = {"read",	       read_f,		1, 0 },
@@ -639,7 +642,10 @@ int main(int argc, char **argv)
 				exit(87);
 			}
 			duration = strtoll(optarg, NULL, 0);
-			if (duration < 1) {
+			if (duration == 0) {
+				/* No action is taken if duration is 0 */
+				exit(0);
+			} else if (duration < 0) {
 				fprintf(stderr, "%lld: invalid duration\n", duration);
 				exit(88);
 			}
@@ -1049,8 +1055,21 @@ check_cwd(void)
 
 	ret = stat64(".", &statbuf);
 	if (ret != 0) {
+		int error = errno;
+
 		fprintf(stderr, "fsstress: check_cwd stat64() returned %d with errno: %d (%s)\n",
-			ret, errno, strerror(errno));
+			ret, error, strerror(error));
+
+		/*
+		 * The current working directory is pinned in memory, which
+		 * means that stat should not have had to do any disk accesses
+		 * to retrieve stat information.  Treat an EIO as an indication
+		 * that the filesystem shut down and exit instead of dumping
+		 * core like the abort() below does.
+		 */
+		if (error == EIO)
+			exit(1);
+
 		goto out;
 	}
 
@@ -1284,14 +1303,24 @@ doproc(void)
 		 */
 		if (errtag != 0 && opno % 100 == 0)  {
 			rval = stat64(".", &statbuf);
-			if (rval == EIO)  {
+			if (rval != 0 && errno == EIO)  {
 				fprintf(stderr, "Detected EIO\n");
 				goto errout;
 			}
 		}
 	}
 errout:
-	assert(chdir("..") == 0);
+	rval = chdir("..");
+	if (rval != 0 && errno == EIO) {
+		/*
+		 * If we can't go up a directory due to EIO, treat that as an
+		 * indication that the filesystem shut down and exit instead of
+		 * dumping core like the abort() below does.
+		 */
+		fprintf(stderr, "Detected EIO, cannot clean up\n");
+		exit(1);
+	}
+	assert(rval == 0);
 	free(homedir);
 	if (cleanup) {
 		int ret;
@@ -1758,23 +1787,38 @@ opendir_path(pathname_t *name)
 void
 process_freq(char *arg)
 {
-	opdesc_t	*p;
-	char		*s;
+	char		*token;
+	char		*argstr = strdup(arg);
+	char		*tokstr = argstr ? argstr : arg;
 
-	s = strchr(arg, '=');
-	if (s == NULL) {
-		fprintf(stderr, "bad argument '%s'\n", arg);
-		exit(1);
-	}
-	*s++ = '\0';
-	for (p = ops; p < ops_end; p++) {
-		if (strcmp(arg, p->name) == 0) {
-			p->freq = atoi(s);
-			return;
+	while ((token = strtok(tokstr, ",")) != NULL) {
+		opdesc_t	*p = ops;
+		char		*s = strchr(token, '=');
+		int		found = 0;
+
+		if (!s) {
+			fprintf(stderr, "bad argument '%s'\n", token);
+			exit(1);
 		}
+
+		*s = '\0';
+		for (; p < ops_end; p++) {
+			if (strcmp(token, p->name) == 0) {
+				p->freq = atoi(s + 1);
+				found = 1;
+				break;
+			}
+		}
+
+		if (!found) {
+			fprintf(stderr, "can't find op type %s for -f\n", token);
+			exit(1);
+		}
+
+		tokstr = NULL;
 	}
-	fprintf(stderr, "can't find op type %s for -f\n", arg);
-	exit(1);
+
+	free(argstr);
 }
 
 int
@@ -3786,6 +3830,7 @@ struct print_flags falloc_flags [] = {
 	{ FALLOC_FL_ZERO_RANGE, "ZERO_RANGE"},
 	{ FALLOC_FL_INSERT_RANGE, "INSERT_RANGE"},
 	{ FALLOC_FL_UNSHARE_RANGE, "UNSHARE_RANGE"},
+	{ FALLOC_FL_WRITE_ZEROES, "WRITE_ZEROES"},
 	{ -1, NULL}
 };
 
@@ -3845,7 +3890,8 @@ do_fallocate(opnum_t opno, long r, int mode)
 		off = roundup_64(off, stb.st_blksize);
 		len = roundup_64(len, stb.st_blksize);
 	}
-	mode |= FALLOC_FL_KEEP_SIZE & random();
+	if (!(mode & FALLOC_FL_WRITE_ZEROES))
+		mode |= FALLOC_FL_KEEP_SIZE & random();
 	e = fallocate(fd, mode, (loff_t)off, (loff_t)len) < 0 ? errno : 0;
 	if (v)
 		printf("%d/%lld: fallocate(%s) %s%s [%lld,%lld] %d\n",
@@ -4469,6 +4515,14 @@ zero_f(opnum_t opno, long r)
 {
 #ifdef HAVE_LINUX_FALLOC_H
 	do_fallocate(opno, r, FALLOC_FL_ZERO_RANGE);
+#endif
+}
+
+void
+write_zeroes_f(opnum_t opno, long r)
+{
+#ifdef HAVE_LINUX_FALLOC_H
+	do_fallocate(opno, r, FALLOC_FL_WRITE_ZEROES);
 #endif
 }
 

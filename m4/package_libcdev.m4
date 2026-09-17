@@ -86,3 +86,33 @@ AC_DEFUN([AC_HAVE_TRIVIAL_AUTO_VAR_INIT],
     CFLAGS="${OLD_CFLAGS}"
     AC_SUBST(autovar_init_cflags)
   ])
+
+#
+# Check if we have a file_getattr system call (Linux)
+#
+AC_DEFUN([AC_HAVE_FILE_GETATTR],
+  [ AC_MSG_CHECKING([for file_getattr syscall])
+    AC_LINK_IFELSE([AC_LANG_PROGRAM([[
+#define _GNU_SOURCE
+#include <sys/syscall.h>
+#include <unistd.h>
+    ]], [[
+         syscall(__NR_file_getattr, 0, 0, 0, 0, 0, 0);
+    ]])],[have_file_getattr=yes
+       AC_MSG_RESULT(yes)],[AC_MSG_RESULT(no)])
+    AC_SUBST(have_file_getattr)
+  ])
+
+# Check if we have fanotify FID support (Linux 5.1+)
+AC_DEFUN([AC_HAVE_FANOTIFY_FID],
+  [ AC_MSG_CHECKING([for fanotify FID support])
+    AC_COMPILE_IFELSE([AC_LANG_PROGRAM([[
+#include <sys/fanotify.h>
+    ]], [[
+       int x = FAN_REPORT_FID;
+       struct fanotify_event_info_fid fid;
+       (void)x; (void)fid;
+    ]])],[have_fanotify_fid=yes
+       AC_MSG_RESULT(yes)],[AC_MSG_RESULT(no)])
+    AC_SUBST(have_fanotify_fid)
+  ])

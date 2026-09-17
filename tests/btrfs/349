@@ -1,0 +1,136 @@
+#! /bin/bash
+# SPDX-License-Identifier: GPL-2.0
+# Copyright (c) 2024 Meta Platforms, Inc.  All Rights Reserved.
+#
+# FS QA Test 349
+#
+# Test various race conditions between qgroup deletion and squota writes
+#
+. ./common/preamble
+_begin_fstest auto qgroup subvol clone
+
+# Import common functions.
+. ./common/reflink
+
+# real QA test starts here
+
+_require_scratch_reflink
+_require_cp_reflink
+_require_scratch_enable_simple_quota
+
+_fixed_by_kernel_commit 1e92637722ae \
+	"btrfs: check for subvolume before deleting squota qgroup"
+_fixed_by_kernel_commit 0c309d66dacd \
+	"btrfs: forbid creating subvol qgroups"
+
+subv1=$SCRATCH_MNT/subv1
+subv2=$SCRATCH_MNT/subv2
+
+prepare()
+{
+	_scratch_mkfs >> $seqres.full
+	_scratch_mount
+	$BTRFS_UTIL_PROG quota enable --simple $SCRATCH_MNT
+	$BTRFS_UTIL_PROG subvolume create $subv1 >> $seqres.full
+	$BTRFS_UTIL_PROG subvolume create $subv2 >> $seqres.full
+	$XFS_IO_PROG -fc "pwrite -q 0 128K" $subv1/f
+	_cp_reflink $subv1/f $subv2/f
+}
+
+# An extent can long outlive its owner. Test this by deleting the owning
+# subvolume, committing the transaction, then deleting the reflinked copy.
+free_from_deleted_owner()
+{
+	echo "free from deleted owner"
+	prepare
+	local subvid1=$(_btrfs_get_subvolid $SCRATCH_MNT subv1)
+
+	$BTRFS_UTIL_PROG filesystem sync $SCRATCH_MNT
+	$BTRFS_UTIL_PROG subvolume delete $subv1 >> $seqres.full
+	$BTRFS_UTIL_PROG qgroup destroy 0/$subvid1 $SCRATCH_MNT >> $seqres.full
+	$BTRFS_UTIL_PROG filesystem sync $SCRATCH_MNT
+	rm $subv2/f
+	_scratch_unmount
+}
+
+# A race where we delete the owner in the same transaction as writing the
+# extent leads to incrementing the squota usage of the missing qgroup.
+# This leaves behind an owner ref with an owner id that cannot exist, so
+# freeing the extent now frees from that qgroup, but there has never
+# been a corresponding usage to free.
+add_to_deleted_owner()
+{
+	echo "add to deleted owner"
+	prepare
+	local subvid1=$(_btrfs_get_subvolid $SCRATCH_MNT subv1)
+
+	$BTRFS_UTIL_PROG filesystem sync $SCRATCH_MNT
+	$BTRFS_UTIL_PROG subvolume delete $subv1 >> $seqres.full
+	$BTRFS_UTIL_PROG qgroup destroy 0/$subvid1 $SCRATCH_MNT >> $seqres.full
+	$BTRFS_UTIL_PROG filesystem sync $SCRATCH_MNT
+	$BTRFS_UTIL_PROG qgroup create 0/$subvid1 $SCRATCH_MNT >> $seqres.full
+	rm $subv2/f
+	_scratch_unmount
+}
+
+# Create a subvol, destroy its qgroup before delayed refs update rfer/excl.
+# On an unfixed kernel the qgroup destroy succeeds (rfer == 0), silently
+# losing the alloc delta. On a fixed kernel the destroy is refused because
+# the ROOT_ITEM still exists.
+same_txn_destroy_race()
+{
+	echo "same txn destroy race"
+	prepare
+
+	# Commit so the next subvol create starts a fresh transaction.
+	$BTRFS_UTIL_PROG filesystem sync $SCRATCH_MNT
+
+	# New subvol -- tree block alloc delayed ref is pending, rfer/excl=0.
+	local subv3=$SCRATCH_MNT/subv3
+	$BTRFS_UTIL_PROG subvolume create $subv3 >> $seqres.full
+	local subvid3=$(_btrfs_get_subvolid $SCRATCH_MNT subv3)
+
+	# rfer/excl still 0 (delayed refs not flushed). Destroy should fail
+	# because the ROOT_ITEM exists.
+	$BTRFS_UTIL_PROG qgroup destroy 0/$subvid3 $SCRATCH_MNT 2>&1
+
+	_scratch_unmount
+}
+
+# Enable squotas on a filesystem that already has a subvolume with data.
+# Pre-existing extents have generation < qgroup_enable_gen, so the qgroup's
+# rfer/excl stay 0 permanently. On an unfixed kernel can_delete_squota_qgroup
+# only checks rfer/excl, so the qgroup can be destroyed for a live subvol.
+# On a fixed kernel, the subvol check prevents deletion.
+pre_existing_data_destroy()
+{
+	echo "pre-existing data destroy"
+	_scratch_mkfs >> $seqres.full
+	_scratch_mount
+
+	# Create subvol and write data BEFORE enabling squotas.
+	$BTRFS_UTIL_PROG subvolume create $subv1 >> $seqres.full
+	$XFS_IO_PROG -fc "pwrite -q 0 128K" $subv1/f
+	sync
+
+	# Enable squotas. Pre-existing data is not accounted (gen < enable_gen).
+	$BTRFS_UTIL_PROG quota enable --simple $SCRATCH_MNT
+	$BTRFS_UTIL_PROG filesystem sync $SCRATCH_MNT
+
+	local subvid1=$(_btrfs_get_subvolid $SCRATCH_MNT subv1)
+
+	# Destroy the qgroup. rfer/excl = 0 because data predates squotas.
+	# Should fail because the ROOT_ITEM still exists.
+	$BTRFS_UTIL_PROG qgroup destroy 0/$subvid1 $SCRATCH_MNT 2>&1
+
+	_scratch_unmount
+}
+
+free_from_deleted_owner
+add_to_deleted_owner
+same_txn_destroy_race
+pre_existing_data_destroy
+
+# success, all done
+status=0
+exit

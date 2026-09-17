@@ -23,8 +23,7 @@ fio_config=$tmp.fio
 fio_out=$tmp.fio.out
 test_file="${SCRATCH_MNT}/foo"
 
-[ $FSTYP == "btrfs" ] &&
-	_fixed_by_kernel_commit 8184620ae212 \
+_fixed_by_fs_commit btrfs 8184620ae212 \
 	"btrfs: fix lost file sync on direct IO write with nowait and dsync iocb"
 
 # We allocate 256M of data for the test file, so require a higher size of 512M
@@ -53,7 +52,7 @@ _require_fio $fio_config
 _scratch_mkfs >>$seqres.full 2>&1
 _require_metadata_journaling $SCRATCH_DEV
 _init_flakey
-_mount_flakey
+_scratch_mount
 
 # We do 64K writes in the fio job.
 _require_congruent_file_oplen $SCRATCH_MNT $((64 * 1024))
@@ -94,7 +93,7 @@ if [ "$digest_after" != "$digest_before" ]; then
 	echo "Digest after power failure:  $digest_after"
 fi
 
-_unmount_flakey
+_scratch_unmount
 
 # success, all done
 echo "Silence is golden"

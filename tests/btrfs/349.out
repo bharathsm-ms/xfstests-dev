@@ -1,0 +1,10 @@
+QA output created by 349
+free from deleted owner
+ERROR: unable to destroy quota group: Device or resource busy
+add to deleted owner
+ERROR: unable to destroy quota group: Device or resource busy
+ERROR: unable to create quota group: Invalid argument
+same txn destroy race
+ERROR: unable to destroy quota group: Device or resource busy
+pre-existing data destroy
+ERROR: unable to destroy quota group: Device or resource busy

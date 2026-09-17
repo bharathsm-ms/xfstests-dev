@@ -25,13 +25,13 @@ _require_scratch
 _require_test_program unlink-fsync
 _require_dm_target flakey
 
-[ "$FSTYP" = "btrfs" ] && _fixed_by_kernel_commit xxxxxxxxxxxx \
+_fixed_by_fs_commit btrfs 0a32e4f0025a \
 	"btrfs: fix log tree replay failure due to file with 0 links and extents"
 
 _scratch_mkfs >> $seqres.full 2>&1 || _fail "mkfs failed"
 _require_metadata_journaling $SCRATCH_DEV
 _init_flakey
-_mount_flakey
+_scratch_mount
 
 # Create our first test file with some data.
 mkdir $SCRATCH_MNT/testdir

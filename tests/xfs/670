@@ -1,0 +1,58 @@
+#! /bin/bash
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (c) 2026 Christoph Hellwig.
+#
+# FS QA Test 670
+#
+# Test that the entire device capacity can be used after resizing a realtime
+# device.
+#
+. ./common/preamble
+_begin_fstest auto quick realtime growfs zone
+
+. ./common/filter
+. ./common/zoned
+
+_require_scratch
+_require_external_realtime_device
+
+minrtdevsize=$((5 * 1024 * 1024)) #kB
+rtdevsize=`_get_device_size $SCRATCH_RTDEV`
+if [ $rtdevsize -lt $minrtdevsize ]; then
+	_notrun "SCRATCH_RTDEV device too small, $rtdevsize < $minrtdevsize"
+fi
+
+_scratch_mkfs -r size=1g  >> $seqres.full 2>&1
+rblocks=`_scratch_xfs_get_sb_field rblocks`
+
+_scratch_mount
+_xfs_force_bdev realtime $SCRATCH_MNT
+free_zones_pre=$(_xfs_get_mountstat $SCRATCH_MNT "free zones:")
+
+echo "Growing file system"
+$XFS_GROWFS_PROG $SCRATCH_MNT -R $((2 * rblocks)) >> $seqres.full 2>&1 || \
+	_fail "growfs failed"
+
+# For zoned file systems, check that the growfs did increase the available free
+# zones.  This avoids a hang on unfixed kernels when filling later.
+free_zones_post=$(_xfs_get_mountstat $SCRATCH_MNT "free zones:")
+if _has_fs_sysfs_attr $SCRATCH_DEV "zoned/max_open_zones"; then
+	if [ "$free_zones_pre" == "$free_zones_post" ]; then
+		_fail "growfs did not increase free zones"
+	fi
+fi
+
+echo "Filling grown file system"
+writesize_mb=32
+dd if=/dev/zero of=$SCRATCH_MNT/fill bs=${writesize_mb}M oflag=direct \
+	>> $seqres.full 2>&1
+
+blocksize=$(_get_block_size $SCRATCH_MNT)
+free_blocks=$(stat -f $SCRATCH_MNT -c '%f')
+
+# check that we really mostly filled the file system
+_within_tolerance "free space after fill" \
+	$free_blocks $((writesize_mb * 1024 * 1024 / blocksize)) 100%
+
+status=0
+exit

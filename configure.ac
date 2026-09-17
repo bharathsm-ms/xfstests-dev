@@ -73,6 +73,8 @@ AC_HAVE_RLIMIT_NOFILE
 AC_NEED_INTERNAL_XFS_IOC_EXCHANGE_RANGE
 AC_HAVE_FICLONE
 AC_HAVE_TRIVIAL_AUTO_VAR_INIT
+AC_HAVE_FILE_GETATTR
+AC_HAVE_FANOTIFY_FID
 
 AC_CHECK_FUNCS([renameat2])
 AC_CHECK_FUNCS([reallocarray])
@@ -102,6 +104,10 @@ AC_CHECK_TYPES([struct btrfs_ioctl_ino_lookup_user_args], [], [], [[
 #include <linux/btrfs.h>
 ]])
 AC_CHECK_TYPES([struct btrfs_ioctl_get_subvol_rootref_args], [], [], [[
+#include <stddef.h>
+#include <linux/btrfs.h>
+]])
+AC_CHECK_TYPES([struct btrfs_ioctl_received_subvol_args], [], [], [[
 #include <stddef.h>
 #include <linux/btrfs.h>
 ]])

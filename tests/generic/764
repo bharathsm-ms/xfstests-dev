@@ -20,7 +20,7 @@ _cleanup()
 
 . ./common/dmflakey
 
-[ "$FSTYP" = "btrfs" ] && _fixed_by_kernel_commit 5e85262e542d \
+_fixed_by_fs_commit btrfs 5e85262e542d \
 	"btrfs: fix fsync of files with no hard links not persisting deletion"
 
 _require_scratch
@@ -30,7 +30,7 @@ _require_test_program "multi_open_unlink"
 _scratch_mkfs >>$seqres.full 2>&1 || _fail "mkfs failed"
 _require_metadata_journaling $SCRATCH_DEV
 _init_flakey
-_mount_flakey
+_scratch_mount
 
 mkdir $SCRATCH_MNT/testdir
 $here/src/multi_open_unlink -f $SCRATCH_MNT/testdir/foo -F -S -n 1 -s 0
@@ -43,7 +43,7 @@ _flakey_drop_and_remount
 # more hard links.
 ls $SCRATCH_MNT/testdir
 
-_unmount_flakey
+_scratch_unmount
 
 echo "Silence is golden"
 status=0

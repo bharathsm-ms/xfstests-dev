@@ -1,0 +1,39 @@
+#! /bin/bash
+# SPDX-License-Identifier: GPL-2.0
+# Copyright (c) 2026 SUSE S.A.  All Rights Reserved.
+#
+# FS QA Test 350
+#
+# Make sure fstrim will not crash when a missing device re-appeared.
+#
+. ./common/preamble
+_begin_fstest auto quick volume trim raid
+
+_fixed_by_kernel_commit 1b1937eb08f5 \
+	"btrfs: do not trim a device which is not writeable"
+
+_require_btrfs_forget_or_module_loadable
+_require_scratch_dev_pool 2
+_scratch_dev_pool_get 2
+dev1=$(echo $SCRATCH_DEV_POOL | $AWK_PROG '{ print $1 }')
+dev2=$(echo $SCRATCH_DEV_POOL | $AWK_PROG '{ print $2 }')
+
+_scratch_pool_mkfs "-m raid1 -d raid1"
+_require_batched_discard $SCRATCH_MNT
+
+# Mount the filesystem in degraded mode
+_btrfs_forget_or_module_reload
+_mount -o degraded $dev1 $SCRATCH_MNT
+
+# Now let devid 2 reappear
+_btrfs device scan $dev2
+
+# Run fstrim, it should skip the re-appeared device, as it still
+# lacks WRITEBALE flag and a proper bdev pointer.
+#
+# For unpatched kernel, it will crash with a NULL pointer dereference.
+$FSTRIM_PROG $SCRATCH_MNT
+
+_scratch_dev_pool_put
+echo "Silence is golden"
+_exit 0

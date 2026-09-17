@@ -41,8 +41,7 @@ _require_attrs trusted
 _exclude_fs overlay
 _require_extra_fs overlay
 
-[ "$FSTYP" = "xfs" ] && _fixed_by_kernel_commit 6da1b4b1ab36 \
-	"xfs: fix an ABBA deadlock in xfs_rename"
+_fixed_by_fs_commit xfs 6da1b4b1ab36 "xfs: fix an ABBA deadlock in xfs_rename"
 
 _scratch_mkfs >> $seqres.full
 _scratch_mount
@@ -81,7 +80,7 @@ worker() {
 		mkdir $SCRATCH_MNT/workdir$tag
 		mkdir $SCRATCH_MNT/upperdir$tag
 
-		mount -t overlay overlay -o "$l,$u,$w,$i" $mergedir
+		_mount -t overlay overlay -o "$l,$u,$w,$i" $mergedir
 		mv $mergedir/etc/access.conf $mergedir/etc/access.conf.bak
 		touch $mergedir/etc/access.conf
 		mv $mergedir/etc/access.conf $mergedir/etc/access.conf.bak

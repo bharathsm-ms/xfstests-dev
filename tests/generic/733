@@ -25,16 +25,10 @@ _require_test_program "punch-alternating"
 _require_test_program "t_reflink_read_race"
 _require_command "$TIMEOUT_PROG" timeout
 
-case "$FSTYP" in
-"btrfs")
-	_fixed_by_kernel_commit 5d6f0e9890ed \
+_fixed_by_fs_commit btrfs 5d6f0e9890ed \
 		"btrfs: stop locking the source extent range during reflink"
-	;;
-"xfs")
-	_fixed_by_kernel_commit 14a537983b22 \
+_fixed_by_fs_commit xfs 14a537983b22 \
 		"xfs: allow read IO and FICLONE to run concurrently"
-	;;
-esac
 
 rm -f "$seqres.full"
 
@@ -70,8 +64,21 @@ done
 echo "fnr=$fnr" >> $seqres.full
 
 echo "Reflink the big file"
-$here/src/t_reflink_read_race "$testdir/file1" "$testdir/file2" \
-	"$testdir/outcome" &>> $seqres.full
+# Workaround the default job control by command grouping so that we can redirect
+# the job control message of the subshell.
+#
+# Job control of bash v5.3.x will output the command which triggered the job
+# control (terminated, core dump etc).
+# And since it's handled by bash itself, redirection of the program won't work
+# for the job control message.
+#
+# Running the command in a command group will make the program run in a subshell
+# so that we can direct the job control message of the subshell.
+#
+# We will check the outcome file to determine if the program is properly
+# terminated, thus no need to bother the job control message.
+{ $here/src/t_reflink_read_race "$testdir/file1" "$testdir/file2" \
+	"$testdir/outcome" ; } &>> $seqres.full
 
 if [ ! -e "$testdir/outcome" ]; then
 	echo "Could not set up program"
