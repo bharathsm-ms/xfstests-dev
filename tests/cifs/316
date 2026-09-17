@@ -1,0 +1,55 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-2.0
+#
+# CIFS: nodfs mount option — DFS referrals should be disabled
+#
+# Behavior under test
+# - Mount a DFS root share with -o nodfs.
+# - Attempting to access a DFS link should fail because the client
+#   will not follow DFS referrals.
+# - Verify the mount option appears in /proc/mounts.
+# - Verify no crash/oops occurs.
+#
+# Kernel code exercised
+#   fs_context.c (nodfs option parsing), connect.c (DFS bypass)
+
+. ./common/preamble
+. ./common/rc
+. ./common/cifs_dfs
+
+_begin_fstest auto quick dfs
+
+_require_cifs_dfs
+[ "$(id -u)" = 0 ] || _notrun "root required"
+
+. ./common/cifs_test
+_cifs_test_init
+command -v python3 >/dev/null || _notrun "python3 required"
+_register_cleanup "_cifs_dfs_unmount; _cifs_test_cleanup"
+_cifs_dfs_mount || _fail "positive-control DFS mount failed"
+_cifs_dfs_workspace target1
+echo referral-control > "$CIFS_DFS_WORK/data" || _fail "positive-control write"
+[ "$(cat "$CIFS_DFS_WORK/data")" = referral-control ] || _fail "positive-control read"
+_cifs_dfs_cache_has_entries "$CIFS_DFS_ROOT/target1" || _fail "positive-control referral missing"
+
+_cifs_test_mount 'vers=3.1.1,nodfs' "$CIFS_DFS_ROOT"
+options=$(awk -v mount="$CIFS_TEST_MNT" '$2==mount {print $4}' /proc/mounts)
+case ",$options," in
+	*,nodfs,*) ;;
+	*) _fail "nodfs absent from mounted options" ;;
+esac
+python3 - "$CIFS_TEST_MNT/target1/${CIFS_DFS_WORK##*/}/data" >> "$seqres.full" 2>&1 <<'PY'
+import errno, pathlib, sys
+try:
+    pathlib.Path(sys.argv[1]).read_bytes()
+except OSError as error:
+    assert error.errno in (errno.EREMOTE, errno.EOPNOTSUPP, errno.ENOENT, errno.ENOTDIR, errno.ELOOP), error
+else:
+    raise RuntimeError('nodfs followed a verified DFS referral')
+PY
+[ "$?" -eq 0 ] || _fail "nodfs did not reject referral traversal"
+
+echo "nodfs mount option handling OK"
+
+status=0
+exit

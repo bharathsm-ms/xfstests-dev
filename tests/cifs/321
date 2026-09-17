@@ -1,0 +1,68 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-2.0
+#
+# CIFS: DFS invalid link — access non-existent path on DFS root
+#
+# Behavior under test
+# - Mount DFS root.
+# - Access a path that does NOT correspond to any DFS link.
+# - Verify clean error (ENOENT, EREMOTE, or similar) — no crash or hang.
+# - Access a deep non-existent path through a valid DFS link.
+# - Verify clean error again.
+#
+# Kernel code exercised
+#   cifs_inval_name_dfs_link_error(), STATUS_PATH_NOT_COVERED handling
+
+. ./common/preamble
+. ./common/rc
+. ./common/cifs_dfs
+
+_begin_fstest auto quick dfs
+
+_require_cifs_dfs
+[ "$(id -u)" = 0 ] || _notrun "root required"
+
+_register_cleanup "_cifs_dfs_unmount; _cleanup"
+command -v python3 >/dev/null || _notrun "python3 required"
+
+
+echo "mount DFS root" >> "$seqres.full"
+_cifs_dfs_mount || _fail "DFS mount failed"
+
+dmesg_before=$(dmesg | wc -l)
+
+_cifs_dfs_workspace target1
+python3 - "$CIFS_DFS_MNT" "$CIFS_DFS_WORK" >> "$seqres.full" 2>&1 <<'PY'
+import errno, os, pathlib, sys, uuid
+root, workspace = map(pathlib.Path, sys.argv[1:])
+missing = root / ('missing_' + uuid.uuid4().hex)
+assert workspace.is_dir(), 'valid referral control failed'
+for operation, arguments in (
+	(os.listdir, (missing,)),
+	(os.stat, (missing,)),
+	(os.listdir, (workspace / 'missing' / 'deep',)),
+	(os.open, (missing / 'file', os.O_CREAT | os.O_WRONLY, 0o600)),
+):
+	try:
+		operation(*arguments)
+	except OSError as error:
+		assert error.errno == errno.ENOENT, error
+	else:
+		raise RuntimeError('nonexistent DFS path unexpectedly succeeded')
+PY
+[ "$?" -eq 0 ] || _fail "DFS missing-path errno contract failed"
+
+# ── Crash check ──────────────────────────────────────────────
+dmesg_after=$(dmesg | wc -l)
+new_lines=$((dmesg_after - dmesg_before))
+if [ $new_lines -gt 0 ]; then
+	if dmesg | tail -n "$new_lines" | grep -qiE 'BUG:|kernel panic|Oops:|RIP:|general protection fault'; then
+		dmesg | tail -n "$new_lines" >> "$seqres.full"
+		_fail "kernel crash detected after DFS invalid link access"
+	fi
+fi
+
+echo "DFS invalid link error handling OK"
+
+status=0
+exit

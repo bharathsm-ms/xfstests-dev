@@ -1,0 +1,80 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-2.0
+#
+# CIFS: DFS link traversal — multiple links, second target, and nested I/O
+#
+# Behavior under test
+# - Mount DFS root and access both target1 and target2 DFS links
+#   in the same mount session.
+# - Verify that data written through target1 does NOT appear via target2
+#   (they point to different backend shares).
+# - Verify directory operations (mkdir, ls, rmdir) through DFS links.
+# - Verify DFS cache shows entries for both targets.
+#
+# Kernel code exercised
+#   dfs.c, dfs_cache.c (multiple concurrent referrals in same mount)
+
+. ./common/preamble
+. ./common/rc
+. ./common/cifs_dfs
+
+_begin_fstest auto quick dfs
+
+_require_cifs_dfs
+[ "$(id -u)" = 0 ] || _notrun "root required"
+
+_register_cleanup "_cifs_dfs_unmount; _cleanup"
+
+
+echo "mount DFS root" >> "$seqres.full"
+_cifs_dfs_mount || _fail "DFS root mount failed"
+
+T1="$CIFS_DFS_MNT/target1"
+T2="$CIFS_DFS_MNT/target2"
+
+# ── Test 1: write/read through both links ─────────────────────
+echo "test1: I/O on target1" >> "$seqres.full"
+_cifs_dfs_workspace target1
+SUB1=${CIFS_DFS_WORK##*/}
+echo "target1-data" > "$T1/$SUB1/file.txt" || _fail "write target1 failed"
+d1=$(cat "$T1/$SUB1/file.txt") || _fail "read target1 failed"
+[ "$d1" = "target1-data" ] || _fail "target1 data mismatch: '$d1'"
+
+echo "test1: I/O on target2" >> "$seqres.full"
+_cifs_dfs_workspace target2
+SUB2=${CIFS_DFS_WORK##*/}
+echo "target2-data" > "$T2/$SUB2/file.txt" || _fail "write target2 failed"
+d2=$(cat "$T2/$SUB2/file.txt") || _fail "read target2 failed"
+[ "$d2" = "target2-data" ] || _fail "target2 data mismatch: '$d2'"
+
+# ── Test 2: target isolation (different backend shares) ───────
+echo "test2: verify target isolation" >> "$seqres.full"
+
+# File written to target1 should NOT appear in target2
+if [ -f "$T2/$SUB1/file.txt" ]; then
+	_fail "target1 fixture visible on target2; distinct DFS backends required"
+else
+	echo "test2: targets are isolated — different backends" >> "$seqres.full"
+fi
+
+# ── Test 3: directory operations through DFS ──────────────────
+echo "test3: directory ops through DFS links" >> "$seqres.full"
+ls "$T1/$SUB1/" >> "$seqres.full" 2>&1 || _fail "ls on target1 subdir failed"
+ls "$T2/$SUB2/" >> "$seqres.full" 2>&1 || _fail "ls on target2 subdir failed"
+
+# rmdir
+rm -f "$T1/$SUB1/file.txt" && rmdir "$T1/$SUB1" 2>>"$seqres.full" || \
+	_fail "rmdir on target1 subdir failed"
+rm -f "$T2/$SUB2/file.txt" && rmdir "$T2/$SUB2" 2>>"$seqres.full" || \
+	_fail "rmdir on target2 subdir failed"
+
+# ── Test 4: DFS cache has entries for both ────────────────────
+echo "test4: verify DFS cache" >> "$seqres.full"
+_cifs_dfs_cache_dump
+_cifs_dfs_cache_has_entries "$CIFS_DFS_ROOT/target1" || _fail "target1 referral absent from cache"
+_cifs_dfs_cache_has_entries "$CIFS_DFS_ROOT/target2" || _fail "target2 referral absent from cache"
+
+echo "DFS nested links and I/O OK"
+
+status=0
+exit

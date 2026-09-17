@@ -1,0 +1,132 @@
+# SPDX-License-Identifier: GPL-2.0
+# Common DFS helper functions for CIFS tests.
+#
+# Requires the following variables in local.config:
+#   CIFS_DFS_ROOT     - DFS root UNC (e.g. //127.0.0.1/dfsroot)
+#   CIFS_DFS_MNT      - Mount point for DFS root
+#   CIFS_CRED_FILE    - Path to credentials file
+#
+# Optional:
+#   CIFS_DFS_TARGET1  - First DFS target UNC
+#   CIFS_DFS_TARGET2  - Second DFS target UNC
+
+# Skip test if DFS is not configured in local.config
+_require_cifs_dfs()
+{
+	[ "$FSTYP" = "cifs" ] || _notrun "requires CIFS"
+	[ -n "${CIFS_DFS_ROOT:-}" ] || \
+		_notrun "CIFS_DFS_ROOT not set — DFS not configured in local.config"
+	[ -n "${CIFS_DFS_MNT:-}" ] || \
+		_notrun "CIFS_DFS_MNT not set in local.config"
+	[ -n "${CIFS_CRED_FILE:-}" ] || \
+		_notrun "CIFS_CRED_FILE not set in local.config"
+	[ -r "$CIFS_CRED_FILE" ] || \
+		_notrun "CIFS_CRED_FILE not found: $CIFS_CRED_FILE"
+	command -v timeout >/dev/null || _notrun "timeout required"
+	_cifs_dfs_owned_mount=false
+	_cifs_dfs_private_dir=
+	_cifs_dfs_files=()
+}
+
+# Mount the DFS root share.  Optional extra mount options via $1.
+_cifs_dfs_mount()
+{
+	local extra_opts="${1:-}" result
+	local opts="credentials=$CIFS_CRED_FILE,vers=3.1.1"
+
+	[ -n "$extra_opts" ] && opts="$opts,$extra_opts"
+	$_cifs_dfs_owned_mount && _fail "DFS test mount already active"
+	if [ -z "$_cifs_dfs_private_dir" ]; then
+		_cifs_dfs_private_dir=$(mktemp -d "/tmp/cifs$seq.dfs.XXXXXXXX") || _fail "create private DFS mountpoint"
+	fi
+	CIFS_DFS_MNT=$_cifs_dfs_private_dir
+	timeout --kill-after=5s 30 mount -t cifs "$CIFS_DFS_ROOT" "$CIFS_DFS_MNT" \
+		-o "$opts,nosharesock"
+	result=$?
+	if awk -v target="$CIFS_DFS_MNT" '$2 == target {found=1} END {exit !found}' /proc/self/mounts; then
+		_cifs_dfs_owned_mount=true
+	else
+		return 1
+	fi
+	return "$result"
+}
+
+# Unmount the DFS root share
+_cifs_dfs_unmount()
+{
+	local path
+	for path in "${_cifs_dfs_files[@]}"; do
+		rm -rf -- "$path" >> "$seqres.full" 2>&1 || { status=1; return 1; }
+	done
+	_cifs_dfs_files=()
+	if ${_cifs_dfs_owned_mount:-false}; then
+		if ! umount -R "$_cifs_dfs_private_dir" >> "$seqres.full" 2>&1; then
+			status=1
+			return 1
+		fi
+		_cifs_dfs_owned_mount=false
+	fi
+	if [ -n "${_cifs_dfs_private_dir:-}" ]; then
+		rmdir "$_cifs_dfs_private_dir" >> "$seqres.full" 2>&1 || { status=1; return 1; }
+		_cifs_dfs_private_dir=
+	fi
+}
+
+_cifs_dfs_workspace()
+{
+	CIFS_DFS_WORK=$(mktemp -d "$CIFS_DFS_MNT/$1/cifs$seq.XXXXXXXX") || _fail "create DFS workspace"
+	_cifs_dfs_files+=("$CIFS_DFS_WORK")
+}
+
+_cifs_dfs_cache_entry()
+{
+	awk -v wanted="$1" '
+		function normalize(path) {
+			gsub(/\\/, "/", path); gsub(/\/+/, "/", path)
+			sub(/\/$/, "", path); return tolower(path)
+		}
+		BEGIN { wanted=normalize(wanted) }
+		/^cache entry: path=/ {
+			path=$0; sub(/^cache entry: path=/, "", path); sub(/,type=.*/, "", path)
+			selected=(normalize(path)==wanted)
+		}
+		selected { print; found=1 }
+		END { if (!found) exit 1 }
+	' "${2:-/proc/fs/cifs/dfscache}"
+}
+
+# Return 0 only for an entry under the requested DFS root or link.
+_cifs_dfs_cache_has_entries()
+{
+	awk -v root="${1:-$CIFS_DFS_ROOT}" '
+		function normalize(path) {
+			gsub(/\\/, "/", path)
+			gsub(/\/+/, "/", path)
+			sub(/\/$/, "", path)
+			return tolower(path)
+		}
+		BEGIN { root=normalize(root) }
+		/^cache entry: path=/ {
+			path=$0; sub(/^cache entry: path=/, "", path); sub(/,type=.*/, "", path)
+			path=normalize(path)
+			if (path==root || index(path, root "/")==1) found=1
+		}
+		END { exit !found }
+	' "${2:-/proc/fs/cifs/dfscache}"
+}
+
+# Flush the DFS referral cache (write 0 to the proc file)
+_cifs_dfs_cache_flush()
+{
+	[ "${CIFS_ALLOW_DFS_CACHE_FLUSH:-}" = yes ] || _notrun "global DFS cache flush requires CIFS_ALLOW_DFS_CACHE_FLUSH=yes"
+	[ -w /proc/fs/cifs/dfscache ] || _notrun "DFS cache control unavailable"
+	echo 0 > /proc/fs/cifs/dfscache || _fail "flush DFS cache failed"
+}
+
+# Print dfscache contents to $seqres.full
+_cifs_dfs_cache_dump()
+{
+	echo "--- dfscache ---" >> "$seqres.full"
+	cat /proc/fs/cifs/dfscache >> "$seqres.full" 2>&1
+	echo "--- end dfscache ---" >> "$seqres.full"
+}

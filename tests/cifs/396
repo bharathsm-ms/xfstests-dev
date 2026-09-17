@@ -1,0 +1,53 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-2.0
+# CIFS: DFS referral data consistency across independent mount cycles
+#
+# Kernel code exercised
+#   dfs_cache.c (dfs_cache_refresh, dfs_cache_noreq_find,
+#                dfs_cache_get_tgt_share, parse_target_share,
+#                purge_cache, refresh_ses_referral)
+#   dfs.c       (target_share_matches_server, tree_connect_dfs_target)
+#   misc.c      (cifs_inval_name_dfs_link_error)
+#   dfs_cache.h (dfs_cache_get_next_tgt)
+
+. ./common/preamble
+. ./common/rc
+. ./common/cifs_dfs
+
+_begin_fstest auto quick
+
+[ "$FSTYP" = "cifs" ] || _notrun "requires CIFS"
+[ "$(id -u)" = 0 ] || _notrun "root required"
+[ -n "$CIFS_CRED_FILE" ] || _notrun "CIFS_CRED_FILE not set"
+[ -n "$CIFS_DFS_ROOT" ] || _notrun "CIFS_DFS_ROOT not set"
+
+. ./common/cifs_test
+_cifs_test_init
+_require_cifs_dfs
+[ -n "$CIFS_DFS_TARGET1" ] || _notrun "CIFS_DFS_TARGET1 required"
+_cleanup_396()
+{
+        _cifs_dfs_unmount
+        _cifs_test_cleanup
+}
+_register_cleanup _cleanup_396
+_cifs_test_mount 'vers=3.1.1,cache=none' "$CIFS_DFS_TARGET1"
+direct=$CIFS_TEST_MNT
+_cifs_test_workspace "$direct"
+name=${CIFS_TEST_WORK##*/}
+echo persistent-data > "$CIFS_TEST_WORK/data" || _fail "prepare direct target fixture"
+for cycle in 1 2 3; do
+        _cifs_dfs_mount 'cache=none' || _fail "DFS mount failed"
+        path="$CIFS_DFS_MNT/target1/$name/data"
+        expected=persistent-data
+        [ "$cycle" -eq 1 ] || expected="cycle-$((cycle - 1))"
+        [ "$(cat "$path")" = "$expected" ] || _fail "DFS remount data mismatch"
+        _cifs_dfs_cache_has_entries "$CIFS_DFS_ROOT/target1" || _fail "target referral missing from cache"
+        echo "cycle-$cycle" > "$path" || _fail "DFS target write failed"
+        [ "$(cat "$direct/$name/data")" = "cycle-$cycle" ] || _fail "DFS writes differ from direct target"
+        _cifs_dfs_unmount || _fail "DFS unmount failed"
+done
+
+echo "Silence is golden"
+status=0
+exit

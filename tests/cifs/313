@@ -1,0 +1,54 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-2.0
+#
+# CIFS: DFS root referral — mount DFS namespace, resolve link, do I/O
+#
+# Behavior under test
+# - Mount a share marked as msdfs root.
+# - Access a file through a DFS link (target1/) — the kernel must follow
+#   the DFS referral transparently.
+# - Verify basic write + read through the resolved path.
+# - Verify /proc/fs/cifs/dfscache is populated after traversal.
+#
+# Kernel code exercised
+#   dfs.c, dfs_cache.c, connect.c (DFS referral resolution)
+
+. ./common/preamble
+. ./common/rc
+. ./common/cifs_dfs
+
+_begin_fstest auto quick dfs
+
+_require_cifs_dfs
+[ "$(id -u)" = 0 ] || _notrun "root required"
+
+_register_cleanup "_cifs_dfs_unmount; _cleanup"
+
+echo "mount DFS root" >> "$seqres.full"
+_cifs_dfs_mount || _fail "DFS root mount failed"
+
+# Access through DFS link target1 — should resolve via referral
+_cifs_dfs_workspace target1
+TESTFILE="$CIFS_DFS_WORK/data"
+
+echo "write through DFS link" >> "$seqres.full"
+echo "dfs-referral-test-data" > "$TESTFILE" 2>>"$seqres.full" || \
+	_fail "write through DFS link failed"
+
+echo "read through DFS link" >> "$seqres.full"
+data=$(cat "$TESTFILE" 2>>"$seqres.full") || _fail "read through DFS link failed"
+[ "$data" = "dfs-referral-test-data" ] || \
+	_fail "data mismatch: expected 'dfs-referral-test-data' got '$data'"
+
+# Verify DFS cache populated
+_cifs_dfs_cache_dump
+_cifs_dfs_cache_has_entries "$CIFS_DFS_ROOT/target1" || \
+	_fail "DFS cache empty after referral traversal"
+
+# Clean up test file
+rm -f "$TESTFILE" 2>/dev/null
+
+echo "DFS root referral resolution OK"
+
+status=0
+exit

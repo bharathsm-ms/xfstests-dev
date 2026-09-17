@@ -211,6 +211,13 @@
 310 auto stress
 311 auto stress
 312 auto stress
+313 auto quick dfs
+314 auto quick dfs
+316 auto quick dfs
+317 auto quick dfs
+319 auto quick dfs
+321 auto quick dfs
+322 auto quick dfs
 334 auto quick
 335 auto quick
 336 auto quick
@@ -258,6 +265,7 @@
 389 auto quick
 393 auto quick
 394 auto quick
+396 auto quick
 398 auto quick
 399 auto quick
 400 auto quick

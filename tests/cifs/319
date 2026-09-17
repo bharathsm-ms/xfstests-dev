@@ -1,0 +1,101 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-2.0
+#
+# CIFS: DFS remount — verify DFS survives remount transitions
+#
+# Behavior under test
+# - Mount DFS root and traverse a link.
+# - Remount read-only (mount -o remount,ro).
+# - Verify reads through DFS link still work.
+# - Remount read-write.
+# - Verify writes through DFS link work again.
+#
+# Kernel code exercised
+#   dfs_cache_remount_fs()
+
+. ./common/preamble
+. ./common/rc
+. ./common/cifs_dfs
+
+_begin_fstest auto quick dfs
+
+_require_cifs_dfs
+[ "$(id -u)" = 0 ] || _notrun "root required"
+
+command -v python3 >/dev/null || _notrun "python3 required"
+readonly_mounts=()
+_cleanup_319()
+{
+	local path
+	for path in "${readonly_mounts[@]}"; do
+		mount -o remount,rw "$path" >> "$seqres.full" 2>&1 || status=1
+	done
+	_cifs_dfs_unmount
+	_cleanup
+}
+_register_cleanup _cleanup_319
+
+
+echo "mount DFS root" >> "$seqres.full"
+_cifs_dfs_mount || _fail "DFS mount failed"
+
+# Create a test file through DFS link
+_cifs_dfs_workspace target1
+TESTFILE="$CIFS_DFS_WORK/data"
+echo "remount-test-data" > "$TESTFILE" 2>>"$seqres.full" || \
+	_fail "initial write failed"
+
+# ── Test 1: remount read-only ────────────────────────────────
+echo "test1: remount ro" >> "$seqres.full"
+referred=$(findmnt --kernel --raw --noheadings --target "$TESTFILE" -o TARGET) || _fail "find referred mount"
+[[ "$referred" == "$CIFS_DFS_MNT/"* ]] || _fail "referral did not create a subordinate mount"
+for path in "$CIFS_DFS_MNT" "$referred"; do
+	mount -o remount,ro "$path" >> "$seqres.full" 2>&1 || _fail "remount DFS filesystem read-only"
+	readonly_mounts+=("$path")
+done
+
+# Read should still work
+data=$(cat "$TESTFILE" 2>>"$seqres.full") || \
+	_fail "read after remount,ro failed"
+[ "$data" = "remount-test-data" ] || \
+	_fail "data mismatch after remount,ro: '$data'"
+
+# Write should fail
+python3 - "$TESTFILE" >> "$seqres.full" 2>&1 <<'PY'
+import errno, os, sys
+try:
+	descriptor = os.open(sys.argv[1], os.O_WRONLY | os.O_APPEND)
+except OSError as error:
+	assert error.errno == errno.EROFS, error
+else:
+	os.close(descriptor)
+	raise RuntimeError('read-only DFS file opened for write')
+PY
+[ "$?" -eq 0 ] || _fail "read-only DFS write contract failed"
+
+echo "test1: ro remount OK" >> "$seqres.full"
+
+# ── Test 2: remount read-write ───────────────────────────────
+echo "test2: remount rw" >> "$seqres.full"
+for path in "${readonly_mounts[@]}"; do
+	mount -o remount,rw "$path" >> "$seqres.full" 2>&1 || _fail "remount DFS filesystem read-write"
+done
+readonly_mounts=()
+
+# Write should work again
+echo "post-remount-rw" >> "$TESTFILE" 2>>"$seqres.full" || \
+	_fail "write after remount,rw failed"
+printf 'remount-test-data\npost-remount-rw\n' > "$tmp.expected"
+cmp "$tmp.expected" "$TESTFILE" || _fail "data changed across DFS remounts"
+
+# DFS cache should still have entries
+_cifs_dfs_cache_dump
+_cifs_dfs_cache_has_entries "$CIFS_DFS_ROOT/target1" || _fail "referral lost after remount"
+
+# Clean up
+unlink "$TESTFILE" 2>/dev/null || true
+
+echo "DFS remount OK"
+
+status=0
+exit

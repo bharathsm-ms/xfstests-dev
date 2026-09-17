@@ -1,0 +1,70 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-2.0
+#
+# CIFS: DFS multi-target failover link
+#
+# Behavior under test
+# - Mount DFS root and access the "failover" link which has two targets
+#   (dfs_target1 and dfs_target2).
+# - Verify I/O succeeds — the client should pick one target from the
+#   referral list.
+# - Verify the data lands on one of the two target directories on the server.
+#
+# Kernel code exercised
+#   dfs.c (multi-target referral parsing), dfs_cache.c
+
+. ./common/preamble
+. ./common/rc
+. ./common/cifs_dfs
+
+_begin_fstest auto quick dfs
+
+_require_cifs_dfs
+[ "$(id -u)" = 0 ] || _notrun "root required"
+[ -n "${CIFS_DFS_TARGET1:-}" ] || _notrun "CIFS_DFS_TARGET1 not set"
+[ -n "${CIFS_DFS_TARGET2:-}" ] || _notrun "CIFS_DFS_TARGET2 not set"
+
+. ./common/cifs_test
+_cifs_test_init
+_register_cleanup "_cifs_dfs_unmount; _cifs_test_cleanup"
+
+
+echo "mount DFS root" >> "$seqres.full"
+_cifs_dfs_mount || _fail "DFS root mount failed"
+
+# Access through the multi-target failover link
+_cifs_dfs_workspace failover
+TESTFILE="$CIFS_DFS_WORK/data"
+
+echo "write through failover DFS link" >> "$seqres.full"
+echo "failover-test-payload" > "$TESTFILE" 2>>"$seqres.full" || \
+	_fail "write through failover DFS link failed"
+
+data=$(cat "$TESTFILE" 2>>"$seqres.full") || \
+	_fail "read through failover link failed"
+[ "$data" = "failover-test-payload" ] || \
+	_fail "data mismatch: '$data'"
+
+# Verify DFS cache shows the failover link was resolved
+_cifs_dfs_cache_dump
+_cifs_dfs_cache_has_entries "$CIFS_DFS_ROOT/failover" || \
+	_fail "DFS cache empty after failover link traversal"
+
+found=0
+for target in "$CIFS_DFS_TARGET1" "$CIFS_DFS_TARGET2"; do
+	_cifs_test_mount 'vers=3.1.1' "$target"
+	target_file="$CIFS_TEST_MNT/${CIFS_DFS_WORK##*/}/data"
+	if [ -f "$target_file" ]; then
+		[ "$(cat "$target_file")" = failover-test-payload ] || _fail "direct target data mismatch"
+		found=$((found + 1))
+	fi
+done
+[ "$found" -ge 1 ] || _fail "DFS data absent from both configured targets"
+
+# Clean up
+rm -f "$TESTFILE" 2>/dev/null
+
+echo "DFS multi-target failover link OK"
+
+status=0
+exit

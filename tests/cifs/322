@@ -1,0 +1,75 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-2.0
+#
+# CIFS: DFS target hint selection and concurrent link cache entries
+#
+# Behavior under test
+# - Mount DFS root and access the "failover" link (two targets).
+# - Verify exactly one target hint in a multi-target referral.
+# - Access a second DFS link to verify the cache handles multiple
+#   concurrent referral entries with different target hints.
+#
+# Kernel code exercised
+#   dfs_cache_noreq_update_tgthint(), __dfs_referral_walk(),
+#   dfs_cache_get_tgt_referral()
+
+. ./common/preamble
+. ./common/rc
+. ./common/cifs_dfs
+
+_begin_fstest auto quick dfs
+
+_require_cifs_dfs
+[ "$(id -u)" = 0 ] || _notrun "root required"
+
+_register_cleanup "_cifs_dfs_unmount; _cleanup"
+
+
+echo "mount DFS root" >> "$seqres.full"
+_cifs_dfs_mount || _fail "DFS mount failed"
+
+# ── Test 1: access failover link, record target hint ──────────
+echo "test1: access failover link" >> "$seqres.full"
+
+_cifs_dfs_workspace failover
+TESTFILE="$CIFS_DFS_WORK/data"
+echo "failover-hint-test" > "$TESTFILE" 2>>"$seqres.full" || \
+	_fail "write through failover link failed"
+
+data=$(cat "$TESTFILE" 2>>"$seqres.full") || \
+	_fail "read through failover link failed"
+[ "$data" = "failover-hint-test" ] || \
+	_fail "data mismatch through failover: '$data'"
+
+# Check dfscache for the failover entry and its target hint
+failover_cache=$(_cifs_dfs_cache_entry "$CIFS_DFS_ROOT/failover") || _fail "failover cache entry missing"
+echo "test1: failover cache entry:" >> "$seqres.full"
+echo "$failover_cache" >> "$seqres.full"
+
+# The cache should show a "(target hint)" for one of the two targets
+[ "$(printf '%s\n' "$failover_cache" | grep -c '(target hint)')" -eq 1 ] || _fail "expected exactly one target hint"
+[ "$(printf '%s\n' "$failover_cache" | grep -c '^[[:space:]]')" -ge 2 ] || _fail "failover referral lacks multiple targets"
+
+# ── Test 2: also access target1 link (different referral) ─────
+echo "test2: access target1 concurrently" >> "$seqres.full"
+_cifs_dfs_workspace target1
+echo "concurrent-data" > "$CIFS_DFS_WORK/data" 2>>"$seqres.full" || \
+	_fail "write through target1 while failover active failed"
+[ "$(cat "$CIFS_DFS_WORK/data")" = concurrent-data ] || _fail "concurrent link data mismatch"
+[ "$(cat "$TESTFILE")" = failover-hint-test ] || _fail "failover link data changed"
+
+# ── Test 3: verify cache has entries for both links ───────────
+echo "test3: verify multi-link cache" >> "$seqres.full"
+_cifs_dfs_cache_dump
+
+_cifs_dfs_cache_entry "$CIFS_DFS_ROOT/failover" | grep -q 'type=link' || _fail "failover link absent from cache"
+_cifs_dfs_cache_entry "$CIFS_DFS_ROOT/target1" | grep -q 'type=link' || _fail "target1 link absent from cache"
+
+# Clean up
+unlink "$TESTFILE" 2>/dev/null || true
+unlink "$CIFS_DFS_WORK/data" || _fail "remove concurrent fixture"
+
+echo "DFS target hint and multi-link cache OK"
+
+status=0
+exit
