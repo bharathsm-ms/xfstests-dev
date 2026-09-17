@@ -5,60 +5,52 @@
 . ./common/preamble
 . ./common/rc
 _begin_fstest auto quick
+. ./common/cifs_debug
 
 [ "$FSTYP" = "cifs" ] || _notrun "requires CIFS"
 [ -n "$TEST_DEV" ] || _notrun "TEST_DEV not set"
 [ -r /proc/fs/cifs/DebugData ] || _notrun "requires DebugData"
 
-_register_cleanup "_test_unmount >/dev/null 2>&1"
-_test_unmount >/dev/null 2>&1
-
-host_from_unc() { echo "$1" | sed -E 's#^//([^/]+)/.*#\1#'; }
-share_from_unc() { echo "$1" | sed -E 's#^//[^/]+/([^/]+).*#\1#'; }
-HOST=$(host_from_unc "$TEST_DEV"); SHARE=$(share_from_unc "$TEST_DEV")
-
-count_sockets_for_share() {
-    # Count connection blocks in DebugData that reference our host.
-    # Each "N) ... ConnectionId:" block represents a separate TCP session.
-    local h="$1"
-    local hl=$(echo "$h" | tr '[:upper:]' '[:lower:]')
-    awk -v HL="$hl" '
-        BEGIN { n=0; in_block=0; target=0 }
-        /^[[:space:]]*[0-9]+[)].*ConnectionId:/ {
-            if (in_block && target) n++
-            in_block=1; target=0; next
-        }
-        in_block {
-            line=tolower($0)
-            if (index(line, HL) > 0) target=1
-        }
-        END { if (in_block && target) n++; print n }
-    ' /proc/fs/cifs/DebugData 2>/dev/null
+M1=""
+M2=""
+M1_MOUNTED=false
+M2_MOUNTED=false
+_cleanup_139() {
+    if $M2_MOUNTED; then
+        umount "$M2" >> "$seqres.full" 2>&1 || status=1
+    fi
+    if $M1_MOUNTED; then
+        umount "$M1" >> "$seqres.full" 2>&1 || status=1
+    fi
+    [ -z "$M2" ] || rmdir "$M2" >> "$seqres.full" 2>&1 || status=1
+    [ -z "$M1" ] || rmdir "$M1" >> "$seqres.full" 2>&1 || status=1
+    _cleanup
 }
+_register_cleanup _cleanup_139
 
 BASE=$(echo "${MOUNT_OPTIONS:-}" | sed -e 's/^\s*-o\s*//')
+BASE=$(printf '%s\n' "$BASE" | awk -F, '{ for (field=1; field<=NF; field++) { if ($field=="nosharesock" || $field=="sharesock") continue; options=options (options ? "," : "") $field } print options }')
 MO_SH=$BASE
-MO_NS=$(echo "$BASE" | awk -F, '{out=""; for(i=1;i<=NF;i++){ if($i=="nosharesock") continue; out=out (out?"," : "") $i } print out}')
-[ -n "$MO_NS" ] && MO_NS="$MO_NS,nosharesock" || MO_NS="nosharesock"
+MO_NS="${BASE:+$BASE,}nosharesock"
 
 M1=$(mktemp -d /tmp/cifs139.sh.XXXXXX) || _fail "mktemp1"
 M2=$(mktemp -d /tmp/cifs139.ns.XXXXXX) || _fail "mktemp2"
 
-before=$(count_sockets_for_share "$HOST")
-echo "cifs139: before=$before" >> $seqres.full
-
 _do "mount -t cifs '$TEST_DEV' '$M1' -o '$MO_SH'" || _fail "mount shared"
-mid=$(count_sockets_for_share "$HOST")
-echo "cifs139: mid=$mid" >> $seqres.full
-[ -n "$mid" ] || _notrun "DebugData parse error"
-[ "$mid" -ge 1 ] || _notrun "cannot observe any session for host in DebugData"
-_do "mount -t cifs '$TEST_DEV' '$M2' -o '$MO_NS'" || _notrun "nosharesock not supported"
+M1_MOUNTED=true
+mid_ids=$(_cifs_debug_share "$TEST_DEV" | awk '$1!="-" {print $1}' | sort -u)
+echo "cifs139: mid_ids=$(echo "$mid_ids" | tr '\n' ' ')" >> $seqres.full
+[ -n "$mid_ids" ] || _notrun "cannot observe target share in DebugData"
+_do "mount -t cifs '$TEST_DEV' '$M2' -o '$MO_NS'" || _fail "mount nosharesock"
+M2_MOUNTED=true
 
-after=$(count_sockets_for_share "$HOST")
-echo "cifs139: after=$after" >> $seqres.full
-[ -n "$after" ] || _notrun "DebugData parse error"
+after_ids=$(_cifs_debug_share "$TEST_DEV" | awk '$6==1 && $1!="-" {print $1}' | sort -u)
+echo "cifs139: after_ids=$(echo "$after_ids" | tr '\n' ' ')" >> $seqres.full
+[ -n "$after_ids" ] || _notrun "DebugData parse error"
 
-[ "$after" -gt "$mid" ] || _fail "nosharesock did not create separate socket (before=$before mid=$mid after=$after)"
+new_after=$(comm -13 <(printf '%s\n' "$mid_ids") <(printf '%s\n' "$after_ids") | grep -c .)
+
+[ "$new_after" -eq 1 ] || _fail "nosharesock did not create exactly one new target ConnectionId"
 
 echo "nosharesock creates separate sockets OK"
 

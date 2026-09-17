@@ -53,9 +53,12 @@ _cifs_debug_share()
 
 _cifs_wait_multichannel()
 {
-	local unc="$1" required="$2" state tries=30 security cipher capabilities
+	local unc="$1" required="$2" connection="${3:-}" state tries=30 security cipher capabilities
 	while [ "$tries" -gt 0 ]; do
 		state=$(_cifs_debug_share "$unc")
+		if [ -n "$connection" ]; then
+			state=$(printf '%s\n' "$state" | awk -v connection="$connection" '$1 == connection')
+		fi
 		if [ -n "$state" ]; then
 			[ "$(printf '%s\n' "$state" | wc -l)" -eq 1 ] ||
 				_notrun "multiple sessions match target share; isolate the test mount"

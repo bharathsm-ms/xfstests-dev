@@ -31,28 +31,41 @@ failures = 0
 
 # Test 1: seek to near-max offset (2^63 - 2) then write
 fd = os.open(filepath, os.O_RDWR)
+rejected = False
+expected_errors = (errno.EFBIG, errno.EINVAL)
 try:
     huge_offset = (1 << 63) - 2  # near LLONG_MAX
     try:
         os.lseek(fd, huge_offset, os.SEEK_SET)
-        os.write(fd, b"X")
-        # If it succeeds, that's unexpected but not a crash
-        print(f"write at offset {huge_offset} succeeded (unexpected but no crash)")
-    except (OSError, OverflowError) as e:
-        print(f"PASS: write at huge offset → {e}")
-except Exception as e:
-    print(f"PASS: huge seek/write rejected: {e}")
+        if os.write(fd, b"X") != 1:
+            raise RuntimeError('short write at huge offset')
+        os.fsync(fd)
+    except OSError as error:
+        if error.errno not in expected_errors:
+            raise
+        rejected = True
+        print(f'huge offset rejected with errno {error.errno}')
 finally:
-    os.close(fd)
+    try:
+        os.close(fd)
+    except OSError as error:
+        if error.errno not in expected_errors:
+            raise
+        rejected = True
+if not rejected:
+    raise RuntimeError('huge-offset write/fsync unexpectedly succeeded')
 
-# Test 2: negative offset seek
+# The huge-offset test closed fd above, so open a fresh descriptor to exercise
+# negative seek; reusing the closed fd would only ever return EBADF.
 fd = os.open(filepath, os.O_RDWR)
 try:
     os.lseek(fd, -1, os.SEEK_SET)
     print("FAIL: negative seek succeeded")
     failures += 1
-except OSError as e:
-    print(f"PASS: negative seek → errno {e.errno} ({e.strerror})")
+except OSError as error:
+    if error.errno != errno.EINVAL:
+        raise
+    print('negative seek rejected with EINVAL')
 finally:
     os.close(fd)
 

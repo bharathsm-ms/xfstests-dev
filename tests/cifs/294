@@ -13,28 +13,49 @@ _begin_fstest auto quick
 [ "$FSTYP" = "cifs" ] || _notrun "requires CIFS"
 [ "$(id -u)" = 0 ] || _notrun "root required"
 [ -n "$TEST_DEV" ] || _notrun "TEST_DEV not set"
+command -v timeout >/dev/null || _notrun "timeout required"
 
 MNT=$(mktemp -d /tmp/cifs294.XXXXXX) || _fail "mktemp"
-_register_cleanup "umount '$MNT' 2>/dev/null; rmdir '$MNT' 2>/dev/null"
+MOUNTED=false
+_cleanup_294()
+{
+    if $MOUNTED; then
+        umount "$MNT" >> "$seqres.full" 2>&1 || status=1
+    fi
+    rmdir "$MNT" >> "$seqres.full" 2>&1 || status=1
+    _cleanup
+}
+_register_cleanup _cleanup_294
 
 # Build mount options with a deliberately wrong password
 base_opts=$(echo "${MOUNT_OPTIONS:-}" | sed -e 's/^\s*-o\s*//')
+case ",$base_opts," in
+    *,sec=krb5,*|*,sec=krb5i,*|*,sec=none,*) _notrun "password authentication required" ;;
+esac
+timeout --kill-after=5s 30 mount -t cifs "$TEST_DEV" "$MNT" \
+    -o "${base_opts:+$base_opts,}nosharesock" >> "$seqres.full" 2>&1 ||
+    _fail "valid-credential control mount failed"
+MOUNTED=true
+umount "$MNT" >> "$seqres.full" 2>&1 || _fail "control unmount failed"
+MOUNTED=false
 # Strip any credentials= or password= and inject a bad one
-bad_opts=$(echo "$base_opts" | sed -E \
-    's/(^|,)credentials=[^,]*//g; s/(^|,)password=[^,]*//g; s/,,/,/g; s/^,//; s/,$//')
-bad_opts="${bad_opts:+$bad_opts,}password=WRONG_PASSWORD_$$,username=WRONG_USER_$$"
+bad_opts=$(printf '%s\n' "$base_opts" | awk -F, '{ for (field=1; field<=NF; field++) { if ($field ~ /^(credentials|cred|password|pass|password2|pass2|username|user)=/ || $field=="nosharesock" || $field=="sharesock") continue; options=options (options ? "," : "") $field } print options }')
+bad_opts="${bad_opts:+$bad_opts,}password=WRONG_PASSWORD_$$,username=WRONG_USER_$$,nosharesock"
 
 dmesg_before=$(dmesg | wc -l)
 
-timeout 30 mount -t cifs "$TEST_DEV" "$MNT" -o "$bad_opts" 2>>"$seqres.full"
+timeout --kill-after=5s 30 mount -t cifs "$TEST_DEV" "$MNT" -o "$bad_opts" > "$tmp.mount" 2>&1
 rc=$?
+cat "$tmp.mount" >> "$seqres.full"
 echo "mount rc=$rc" >> "$seqres.full"
 
 if [ $rc -eq 0 ]; then
-    umount "$MNT" 2>/dev/null
-    # Some servers allow guest fallback — that's OK, not a crash
-    echo "mount unexpectedly succeeded (guest fallback?)" >> "$seqres.full"
+    MOUNTED=true
+    _fail "mount unexpectedly succeeded with invalid credentials"
 fi
+[ "$rc" -ne 124 ] && [ "$rc" -ne 137 ] || _fail "invalid-credential mount timed out"
+grep -Eq 'mount error\((1|13)\)' "$tmp.mount" ||
+    _fail "mount did not report an authentication/permission rejection"
 
 # Check no kernel crash
 dmesg_after=$(dmesg | wc -l)

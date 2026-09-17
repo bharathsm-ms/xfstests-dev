@@ -1,0 +1,264 @@
+#!/bin/bash
+
+_cifs_test_init()
+{
+	[ "$FSTYP" = cifs ] || _notrun "requires CIFS"
+	[ "$(id -u)" -eq 0 ] || _notrun "root required"
+	_cifs_test_mounts=()
+	_cifs_test_dirs=()
+	_cifs_test_files=()
+	_cifs_test_children=()
+	_cifs_test_settings=()
+	_cifs_test_values=()
+	_register_cleanup _cifs_test_cleanup
+}
+
+_cifs_test_cleanup()
+{
+	local child path index
+	for child in "${_cifs_test_children[@]}"; do
+		kill "$child" 2>/dev/null || true
+	done
+	for child in "${_cifs_test_children[@]}"; do
+		wait "$child" 2>/dev/null || true
+	done
+	for index in "${!_cifs_test_settings[@]}"; do
+		printf '%s\n' "${_cifs_test_values[index]}" > "${_cifs_test_settings[index]}" || status=1
+	done
+	for path in "${_cifs_test_files[@]}"; do
+		rm -rf -- "$path" >> "$seqres.full" 2>&1 || status=1
+	done
+	for ((index=${#_cifs_test_mounts[@]}-1; index>=0; index--)); do
+		umount "${_cifs_test_mounts[index]}" >> "$seqres.full" 2>&1 || status=1
+	done
+	for path in "${_cifs_test_dirs[@]}"; do
+		rmdir "$path" >> "$seqres.full" 2>&1 || status=1
+	done
+	_cleanup
+}
+
+_cifs_test_mount()
+{
+	local options="$1" device="${2:-$TEST_DEV}" result
+	command -v timeout >/dev/null || _notrun "timeout required"
+	[ -r "$CIFS_CRED_FILE" ] || _notrun "CIFS_CRED_FILE required"
+	CIFS_TEST_MNT=$(mktemp -d "/tmp/cifs$seq.XXXXXXXX") || _fail "mktemp mountpoint"
+	_cifs_test_dirs+=("$CIFS_TEST_MNT")
+	timeout --kill-after=5s 30 mount -t cifs "$device" "$CIFS_TEST_MNT" \
+		-o "credentials=$CIFS_CRED_FILE,nosharesock,$options" >> "$seqres.full" 2>&1
+	result=$?
+	if awk -v target="$CIFS_TEST_MNT" '$2 == target {found=1} END {exit !found}' /proc/self/mounts; then
+		_cifs_test_mounts+=("$CIFS_TEST_MNT")
+	else
+		_fail "requested filesystem was not attached"
+	fi
+	[ "$result" -eq 0 ] || _fail "mount with requested options failed"
+}
+
+_cifs_test_workspace()
+{
+	CIFS_TEST_WORK=$(mktemp -d "${1:-$TEST_DIR}/cifs$seq.XXXXXXXX") || _fail "mktemp workspace"
+	_cifs_test_files+=("$CIFS_TEST_WORK")
+}
+
+_cifs_test_mount_option()
+{
+	awk -v target="$CIFS_TEST_MNT" -v expected="$1" '
+		$2 == target {
+			split($4, options, ",")
+			for (option in options)
+				if (options[option] == expected) found=1
+		}
+		END {exit !found}
+	' /proc/self/mounts || _fail "requested mount option $1 is not active"
+}
+
+_cifs_test_mount_rejected()
+{
+	local options="$1" device="$2" expected="$3" mountpoint result
+	command -v timeout >/dev/null || _notrun "timeout required"
+	mountpoint=$(mktemp -d "/tmp/cifs$seq.XXXXXXXX") || _fail "mktemp negative mountpoint"
+	_cifs_test_dirs+=("$mountpoint")
+	timeout --kill-after=5s 30 mount -t cifs "$device" "$mountpoint" \
+		-o "$options,nosharesock" > "$tmp.mount-rejected" 2>&1
+	result=$?
+	cat "$tmp.mount-rejected" >> "$seqres.full"
+	if awk -v target="$mountpoint" '$2 == target {found=1} END {exit !found}' /proc/self/mounts; then
+		_cifs_test_mounts+=("$mountpoint")
+		_fail "negative mount unexpectedly attached a filesystem"
+	fi
+	[ "$result" -ne 0 ] || _fail "negative mount unexpectedly succeeded"
+	[ "$result" -ne 124 ] && [ "$result" -ne 137 ] || _fail "negative mount timed out"
+	grep -Eiq "$expected" "$tmp.mount-rejected" || _fail "mount failed for an unexpected reason"
+}
+
+_cifs_test_save_setting()
+{
+	local value
+	[ -r "$1" ] && [ -w "$1" ] || _notrun "required CIFS setting unavailable"
+	value=$(cat "$1") || _fail "read original CIFS setting"
+	_cifs_test_settings+=("$1")
+	_cifs_test_values+=("$value")
+}
+
+_cifs_test_digest()
+{
+	local digest
+	digest=$(sha256sum "$1") || return 1
+	digest=${digest%% *}
+	[[ "$digest" =~ ^[a-f0-9]{64}$ ]] || return 1
+	printf '%s\n' "$digest"
+}
+
+_cifs_test_wait()
+{
+	local child failures=0
+	for child in "${_cifs_test_children[@]}"; do
+		wait "$child" || failures=$((failures + 1))
+	done
+	_cifs_test_children=()
+	[ "$failures" -eq 0 ] || _fail "$failures I/O workers failed"
+}
+
+_cifs_test_ioctl_info()
+{
+	python3 - "$1" "${2:-}" <<'PY'
+import fcntl, os, struct, sys
+descriptor = os.open(sys.argv[1], os.O_RDONLY)
+try:
+	info = bytearray(64)
+	fcntl.ioctl(descriptor, 0x8040cf05, info)
+	version, protocol, flags = struct.unpack_from('=IHH', info)
+	assert version == 1, 'unsupported mount-info version'
+	assert protocol in (0x202, 0x210, 0x300, 0x302, 0x311), 'invalid SMB dialect'
+	if sys.argv[2]:
+		assert protocol == int(sys.argv[2], 0), 'negotiated dialect mismatch'
+	capabilities = struct.unpack_from('=I', info, 16)[0]
+	maximum_component = struct.unpack_from('=I', info, 40)[0]
+	assert maximum_component > 0, 'invalid maximum path component'
+	connection = bytearray(12)
+	fcntl.ioctl(descriptor, 0x800ccf0c, connection)
+	tree, session = struct.unpack('=IQ', connection)
+	print(version, hex(protocol), hex(capabilities), tree, session)
+finally:
+	os.close(descriptor)
+PY
+}
+
+_cifs_test_symlinks()
+{
+	python3 - "$1" <<'PY'
+import errno, os, stat, sys
+from pathlib import Path
+root = Path(sys.argv[1])
+target = root / 'target_file'
+assert target.write_bytes(b'target-data\n') == 12
+try:
+	os.symlink('target_file', root / 'file_link')
+except OSError as error:
+	if error.errno == errno.EOPNOTSUPP:
+		sys.exit(77)
+	raise
+(root / 'target_dir').mkdir()
+assert (root / 'target_dir/inner').write_bytes(b'inner-data\n') == 11
+(root / 'deep/one/two').mkdir(parents=True)
+assert (root / 'deep/one/two/data').write_bytes(b'deep-data\n') == 10
+for name, destination in (
+	('dir_link', 'target_dir'), ('chain', 'file_link'),
+	('deep_link', 'deep/one/two/data'), ('link with spaces', 'target_file'),
+	('dangling', 'missing_target'),
+):
+	os.symlink(destination, root / name)
+	assert os.readlink(root / name) == destination
+	assert stat.S_ISLNK(os.lstat(root / name).st_mode)
+assert os.readlink(root / 'file_link') == 'target_file'
+assert stat.S_ISLNK(os.lstat(root / 'file_link').st_mode)
+for name in ('file_link', 'chain', 'link with spaces'):
+	assert (root / name).read_bytes() == b'target-data\n'
+assert (root / 'dir_link/inner').read_bytes() == b'inner-data\n'
+assert {entry.name for entry in (root / 'dir_link').iterdir()} == {'inner'}
+assert (root / 'deep_link').read_bytes() == b'deep-data\n'
+try:
+	(root / 'dangling').read_bytes()
+except OSError as error:
+	assert error.errno == errno.ENOENT
+else:
+	raise AssertionError('dangling symlink unexpectedly resolved')
+assert target.write_bytes(b'updated-data\n') == 13
+assert (root / 'file_link').read_bytes() == b'updated-data\n'
+assert (root / 'chain').read_bytes() == b'updated-data\n'
+(root / 'file_link').unlink()
+assert not os.path.lexists(root / 'file_link')
+assert target.read_bytes() == b'updated-data\n'
+PY
+}
+
+_cifs_test_acl_copy()
+{
+	python3 - "$1" "$2" <<'PY'
+import os, struct, sys
+def permissions(descriptor):
+	assert len(descriptor) >= 20
+	revision, reserved, control, owner, group, sacl, dacl = struct.unpack_from('<BBHIIII', descriptor)
+	assert revision == 1 and control & 0x8000 and control & 4
+	assert 20 <= dacl <= len(descriptor) - 8
+	acl_revision, reserved, size, count, reserved2 = struct.unpack_from('<BBHHH', descriptor, dacl)
+	assert size >= 8 and dacl + size <= len(descriptor)
+	cursor = dacl + 8
+	entries = []
+	for number in range(count):
+		assert cursor + 4 <= dacl + size
+		kind, flags, length = struct.unpack_from('<BBH', descriptor, cursor)
+		assert length >= 4 and cursor + length <= dacl + size
+		entries.append((kind, flags, descriptor[cursor + 4:cursor + length]))
+		cursor += length
+	if all(kind == 0 and flags == 0 for kind, flags, body in entries):
+		entries = list(dict.fromkeys(entries))
+	return revision, control, acl_revision, entries
+
+source, target = sys.argv[1:]
+original = os.getxattr(source, 'system.cifs_acl')
+expected = permissions(original)
+descriptor = os.open(source, os.O_RDONLY)
+try:
+	assert permissions(os.getxattr(descriptor, 'system.cifs_acl')) == expected
+	permissions(os.getxattr(descriptor, 'system.cifs_ntsd'))
+finally:
+	os.close(descriptor)
+os.setxattr(target, 'system.cifs_acl', original)
+assert permissions(os.getxattr(target, 'system.cifs_acl')) == expected, 'copied DACL changed permissions'
+permissions(os.getxattr(target, 'system.cifs_ntsd'))
+PY
+}
+
+_cifs_test_socket_snapshot()
+{
+	ss -Hnt state established '( dport = :445 )' |
+		awk '{print $(NF-1), $NF}' | sort -u
+}
+
+_cifs_test_new_socket()
+{
+	local before="$1" after="$2"
+	CIFS_TEST_SOCKET=$(comm -13 "$before" "$after")
+	[ -n "$CIFS_TEST_SOCKET" ] && [ "$(printf '%s\n' "$CIFS_TEST_SOCKET" | wc -l)" -eq 1 ] ||
+		_notrun "cannot isolate one test-owned SMB TCP connection"
+}
+
+_cifs_test_disconnect()
+{
+	python3 - "$CIFS_TEST_SOCKET" <<'PY'
+import subprocess, sys
+local, peer = sys.argv[1].split()
+local_address, local_port = local.rsplit(':', 1)
+peer_address, peer_port = peer.rsplit(':', 1)
+assert peer_port == '445'
+query = ['src', local_address.strip('[]'), 'sport', '=', ':' + local_port,
+         'dst', peer_address.strip('[]'), 'dport', '=', ':445']
+before = subprocess.run(['ss', '-Hnt', 'state', 'established', *query], check=True, capture_output=True, text=True)
+assert len(before.stdout.splitlines()) == 1, 'test socket no longer unique'
+subprocess.run(['ss', '-K', *query], check=True, timeout=10)
+after = subprocess.run(['ss', '-Hnt', 'state', 'established', *query], check=True, capture_output=True, text=True)
+assert not after.stdout.strip(), 'test socket survived disconnect injection'
+PY
+}
