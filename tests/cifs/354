@@ -1,0 +1,57 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-2.0
+#
+# CIFS: oplock break acknowledgment — trigger lease/oplock break via 2nd mount
+#
+# Exercises: SMB2_oplock_break, smb2_downgrade_oplock, smb2_set_oplock_level,
+#            smb2_is_read_op, smb2_create_lease_buf, smb2_parse_lease_buf
+
+. ./common/preamble
+. ./common/rc
+
+_begin_fstest auto quick
+
+[ "$FSTYP" = "cifs" ] || _notrun "requires CIFS"
+[ "$(id -u)" = 0 ] || _notrun "root required"
+[ -n "$TEST_DEV" ] || _notrun "TEST_DEV not set"
+[ -n "$TEST_DIR" ] || _notrun "TEST_DIR not set"
+[ -n "$CIFS_CRED_FILE" ] || _notrun "CIFS_CRED_FILE not set"
+
+. ./common/cifs_test
+. ./common/cifs_debug
+_cifs_test_init
+command -v python3 >/dev/null || _notrun "python3 required"
+_cifs_test_mount 'vers=3.1.1,cache=strict,actimeo=0'
+_cifs_test_workspace "$CIFS_TEST_MNT"
+first="$CIFS_TEST_WORK/data"
+relative=${CIFS_TEST_WORK##*/}
+_cifs_test_mount 'vers=3.1.1,cache=strict,actimeo=0'
+second="$CIFS_TEST_MNT/$relative/data"
+before=$(_cifs_stat "$TEST_DEV" OplockBreaks:) || _notrun "per-share oplock counter unavailable"
+timeout --kill-after=5s 30 python3 - "$first" "$second" >> "$seqres.full" 2>&1 <<'PY'
+import os, sys
+descriptor = os.open(sys.argv[1], os.O_CREAT | os.O_RDWR, 0o600)
+try:
+	original = b'oplock-data\n'
+	assert os.write(descriptor, original) == len(original)
+	os.fsync(descriptor)
+	assert os.pread(descriptor, 128, 0) == original
+	replacement = b'break-trigger-data\n'
+	contender = os.open(sys.argv[2], os.O_WRONLY | os.O_TRUNC)
+	try:
+		assert os.write(contender, replacement) == len(replacement)
+		os.fsync(contender)
+	finally:
+		os.close(contender)
+	assert os.pread(descriptor, 128, 0) == replacement, 'held descriptor returned stale data'
+finally:
+	os.close(descriptor)
+PY
+[ "$?" -eq 0 ] || _fail "held-descriptor coherency failed"
+after=$(_cifs_stat "$TEST_DEV" OplockBreaks:) || _fail "read post-write oplock counter"
+[ "$after" -gt "$before" ] || _fail "no oplock break observed"
+echo "OplockBreaks delta=$((after - before))" >> "$seqres.full"
+
+echo "oplock break coverage OK"
+status=0
+exit

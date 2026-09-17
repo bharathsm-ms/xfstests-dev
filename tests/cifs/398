@@ -1,0 +1,127 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-2.0
+# CIFS: File ops — cache=loose, write_iter, serverclose, netfs invalidation
+#
+# Kernel code exercised
+#   file.c     (cifs_file_write_iter, cifs_loose_read_iter,
+#               cifs_netfs_invalidate_cache, serverclose_work)
+#   smb2ops.c  (smb2_wp_retry_size, smb2_is_read_op, smb2_compare_fids)
+
+. ./common/preamble
+. ./common/rc
+
+_begin_fstest auto quick
+
+[ "$FSTYP" = "cifs" ] || _notrun "requires CIFS"
+[ "$(id -u)" = 0 ] || _notrun "root required"
+[ -n "$TEST_DEV" ] || _notrun "TEST_DEV not set"
+[ -n "$CIFS_CRED_FILE" ] || _notrun "CIFS_CRED_FILE not set"
+
+. ./common/cifs_test
+_cifs_test_init
+dd if=/dev/urandom of="$tmp.expected" bs=1M count=4 status=none || _fail "prepare expected data"
+
+dmesg_before=$(dmesg | wc -l)
+
+# Test 1: cache=loose mount — exercises cifs_loose_read_iter
+_cifs_test_mount 'vers=3.1.1,cache=loose'
+_cifs_test_mount_option cache=loose
+rc=$?
+echo "cache=loose mount rc=$rc" >> "$seqres.full"
+if [ $rc -ne 0 ]; then
+        echo "cache=loose not supported — skip"
+        status=0
+        exit
+fi
+
+_cifs_test_workspace "$CIFS_TEST_MNT"
+TDIR=$CIFS_TEST_WORK
+
+# Test 1a: Small writes via echo (write_iter path)
+for i in $(seq 1 20); do
+        echo "loose_write_$i" > "$TDIR/loose_$i" || _fail "loose write failed"
+done
+echo "small writes done" >> "$seqres.full"
+
+# Test 1b: Reads via cat (loose_read_iter)
+for i in $(seq 1 20); do
+        [ "$(cat "$TDIR/loose_$i")" = "loose_write_$i" ] || _fail "loose read mismatch"
+done
+echo "small reads done" >> "$seqres.full"
+
+# Test 1c: Large buffered write (cifs_file_write_iter)
+dd if="$tmp.expected" of="$TDIR/large_loose" bs=1M conv=fsync 2>>"$seqres.full" || _fail "large loose write failed"
+echo "large write rc=$?" >> "$seqres.full"
+cmp "$tmp.expected" "$TDIR/large_loose" || _fail "large loose data mismatch"
+echo "large read rc=$?" >> "$seqres.full"
+
+# Test 1d: Append writes
+: > "$tmp.append" || _fail "prepare append expectation"
+for i in $(seq 1 10); do
+        echo "append_$i" >> "$TDIR/append_file" || _fail "append failed"
+        echo "append_$i" >> "$tmp.append" || _fail "prepare append data"
+done
+cmp "$tmp.append" "$TDIR/append_file" || _fail "append data mismatch"
+
+# Test 1e: Overwrite existing files (exercises close+reopen)
+for i in $(seq 1 5); do
+        echo "overwrite_$i" > "$TDIR/loose_1" || _fail "overwrite failed"
+done
+[ "$(cat "$TDIR/loose_1")" = overwrite_5 ] || _fail "overwrite mismatch"
+
+
+# Test 2: cache=none — exercises direct I/O path
+_cifs_test_mount 'vers=3.1.1,cache=none'
+_cifs_test_mount_option cache=none
+rc=$?
+echo "cache=none mount rc=$rc" >> "$seqres.full"
+if [ $rc -eq 0 ]; then
+        _cifs_test_workspace "$CIFS_TEST_MNT"
+        TDIR=$CIFS_TEST_WORK
+
+        # Direct I/O writes and reads
+        dd if="$tmp.expected" of="$TDIR/direct" bs=64K conv=fsync 2>>"$seqres.full" || _fail "uncached write failed"
+        cmp "$tmp.expected" "$TDIR/direct" || _fail "uncached data mismatch"
+
+        # Concurrent writes to same file
+        truncate -s 4194304 "$TDIR/conc" || _fail "prepare concurrent file"
+        for worker in $(seq 0 3); do
+                dd if="$tmp.expected" of="$TDIR/conc" bs=1M count=1 skip="$worker" seek="$worker" conv=notrunc,fsync 2>>"$seqres.full" &
+                _cifs_test_children+=("$!")
+        done
+        _cifs_test_wait
+        cmp "$tmp.expected" "$TDIR/conc" || _fail "concurrent write data mismatch"
+fi
+
+# Test 3: Short closetimeo — exercises serverclose_work
+_cifs_test_mount 'vers=3.1.1,closetimeo=1'
+_cifs_test_mount_option closetimeo=1
+rc=$?
+echo "closetimeo=1 mount rc=$rc" >> "$seqres.full"
+if [ $rc -eq 0 ]; then
+        _cifs_test_workspace "$CIFS_TEST_MNT"
+        TDIR=$CIFS_TEST_WORK
+
+        # Open and close many files rapidly
+        for i in $(seq 1 50); do
+                echo "close_$i" > "$TDIR/f_$i" || _fail "close workload write failed"
+        done
+        # Wait for deferred closes to fire
+        sleep 3
+        # Read them back (should reopen)
+        for i in $(seq 1 50); do
+                [ "$(cat "$TDIR/f_$i")" = "close_$i" ] || _fail "reopened data mismatch"
+        done
+
+fi
+
+dmesg_after=$(dmesg | wc -l)
+if [ $((dmesg_after - dmesg_before)) -gt 0 ]; then
+        dmesg | tail -n $((dmesg_after - dmesg_before)) >> "$seqres.full"
+        dmesg | tail -n $((dmesg_after - dmesg_before)) | \
+                grep -qiE 'BUG:|panic|Oops:' && _fail "kernel crash during file ops"
+fi
+
+echo "Silence is golden"
+status=0
+exit

@@ -1,0 +1,62 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-2.0
+# CIFS: cache=strict I/O — exercise strict write/read paths
+# Exercises: file.c (cifs_strict_writev, cifs_strict_readv), smb2file.c
+
+. ./common/preamble
+. ./common/rc
+_begin_fstest auto quick
+. ./common/cifs_test
+_cifs_test_init
+
+[ "$FSTYP" = "cifs" ] || _notrun "requires CIFS"
+[ "$(id -u)" = 0 ] || _notrun "root required"
+[ -n "$TEST_DEV" ] || _notrun "TEST_DEV not set"
+[ -n "$CIFS_CRED_FILE" ] || _notrun "CIFS_CRED_FILE not set"
+
+_cifs_test_mount 'vers=3.1.1,cache=strict'
+MNT=$CIFS_TEST_MNT
+_cifs_test_workspace "$MNT"
+F="$CIFS_TEST_WORK/data"
+
+# Write with fsync (strict mode flushes immediately)
+dd if=/dev/urandom of="$tmp.expected" bs=4096 count=64 status=none || _fail "prepare payload"
+dd if="$tmp.expected" of="$F" bs=4096 conv=fsync status=none || _fail "write"
+
+# Drop page cache and re-read
+cmp "$tmp.expected" "$F" || _fail "strict mode data mismatch"
+
+# Append + fsync pattern
+for i in $(seq 1 20); do
+    echo "append-$i" >> "$F" || _fail "append"
+    echo "append-$i" >> "$tmp.expected"
+    sync -f "$F" || _fail "sync append"
+done
+cmp "$tmp.expected" "$F" || _fail "append data mismatch"
+
+# Random I/O pattern (exercises strict read/write with varying offsets)
+python3 -c "
+import os, random
+random.seed(372)
+expected = bytearray(open('$tmp.expected', 'rb').read())
+fd = os.open('$F', os.O_RDWR)
+for _ in range(100):
+    off = random.randint(0, 200000)
+    os.lseek(fd, off, os.SEEK_SET)
+    if random.random() > 0.5:
+        payload = b'x' * random.randint(1, 4096)
+        assert os.write(fd, payload) == len(payload)
+        expected[off:off+len(payload)] = payload
+    else:
+        length = random.randint(1, 4096)
+        assert os.read(fd, length) == expected[off:off+length]
+os.fsync(fd)
+assert os.pread(fd, len(expected), 0) == expected
+os.close(fd)
+print('random strict I/O done')
+    " >> "$seqres.full" 2>&1 || _fail "random strict I/O validation failed"
+
+unlink "$F" 2>/dev/null || true
+echo "cache=strict I/O OK"
+status=0
+exit

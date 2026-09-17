@@ -1,0 +1,46 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-2.0
+# CIFS: read completion handler — large reads triggering handle_read_data
+# Exercises: handle_read_data, smb3_handle_read_data, receive_encrypted_read (smb2ops.c)
+
+. ./common/preamble
+. ./common/rc
+_begin_fstest auto quick
+. ./common/cifs_test
+_cifs_test_init
+
+[ "$FSTYP" = "cifs" ] || _notrun "requires CIFS"
+[ "$(id -u)" = 0 ] || _notrun "root required"
+[ -n "$TEST_DIR" ] || _notrun "TEST_DIR not set"
+_cifs_test_workspace
+F="$CIFS_TEST_WORK/data"
+
+# Create a 16M file
+dd if=/dev/urandom of="$tmp.expected" bs=1M count=16 status=none || _fail "prepare payload"
+dd if="$tmp.expected" of="$F" bs=1M conv=fsync status=none || _fail "create"
+expected=$(_cifs_test_digest "$tmp.expected") || _fail "hash payload"
+
+# Concurrent large reads to exercise read completion handler
+for i in 1 2 3 4; do
+	(
+		trap - EXIT HUP INT QUIT TERM
+		actual=$(_cifs_test_digest "$F") || exit 1
+		[ "$actual" = "$expected" ]
+	) &
+	_cifs_test_children+=("$!")
+done
+_cifs_test_wait
+
+# Verify file integrity after concurrent reads
+cmp "$tmp.expected" "$F" || _fail "data corruption after concurrent reads"
+
+# Different rsize reads (exercises different completion paths)
+for bs in 4096 65536 262144 1048576 4194304; do
+	dd if="$F" of="$tmp.read" bs=$bs status=none || _fail "read failed"
+	cmp "$tmp.expected" "$tmp.read" || _fail "read content mismatch"
+done
+
+unlink "$F" 2>/dev/null || true
+echo "read completion handler OK"
+status=0
+exit

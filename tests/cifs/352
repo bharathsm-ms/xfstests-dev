@@ -1,0 +1,78 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-2.0
+#
+# CIFS: SMB2 lock PDU — byte-range lock via SMB2_LOCK command
+#
+# Exercises: smb2_lockv, SMB2_lock, smb2_mand_lock
+
+. ./common/preamble
+. ./common/rc
+
+_begin_fstest auto quick
+
+[ "$FSTYP" = "cifs" ] || _notrun "requires CIFS"
+[ "$(id -u)" = 0 ] || _notrun "root required"
+[ -n "$TEST_DIR" ] || _notrun "TEST_DIR not set"
+
+. ./common/cifs_test
+_cifs_test_init
+command -v python3 >/dev/null || _notrun "python3 required"
+_cifs_test_workspace
+
+TESTFILE="$CIFS_TEST_WORK/data"
+dd if=/dev/zero of="$TESTFILE" bs=4096 count=100 2>>"$seqres.full" || _fail "create"
+
+# Multiple concurrent lock holders via flock + fcntl
+python3 -c "
+import fcntl, struct, os, sys, subprocess
+
+path = '$TESTFILE'
+F_RDLCK, F_WRLCK, F_UNLCK = 0, 1, 2
+
+# The competing descriptor must belong to a separate process
+fd1 = os.open(path, os.O_RDWR)
+contender = '''
+import errno, fcntl, os, sys
+descriptor = os.open(sys.argv[1], os.O_RDWR)
+busy = sys.argv[2] == 'busy'
+try:
+    for offset in range(0, 40960, 4096):
+        try:
+            fcntl.lockf(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB, 2048, offset)
+        except OSError as error:
+            assert busy and error.errno in (errno.EACCES, errno.EAGAIN), error
+        else:
+            assert not busy, 'conflicting lock succeeded'
+            fcntl.lockf(descriptor, fcntl.LOCK_UN, 2048, offset)
+finally:
+    os.close(descriptor)
+'''
+
+# Lock different ranges on fd1
+for offset in range(0, 40960, 4096):
+    lk = struct.pack('hhqqi', F_WRLCK, 0, offset, 2048, 0)
+    fcntl.fcntl(fd1, fcntl.F_SETLK, lk)
+
+subprocess.run([sys.executable, '-c', contender, path, 'busy'], check=True, timeout=10)
+
+# Unlock all on fd1
+unlock = struct.pack('hhqqi', F_UNLCK, 0, 0, 0, 0)
+fcntl.fcntl(fd1, 6, unlock)
+print('fd1 unlock all ok')
+
+subprocess.run([sys.executable, '-c', contender, path, 'free'], check=True, timeout=10)
+
+# flock test (advisory)
+fcntl.flock(fd1, fcntl.LOCK_EX | fcntl.LOCK_NB)
+print('flock LOCK_EX ok')
+fcntl.flock(fd1, fcntl.LOCK_UN)
+print('flock LOCK_UN ok')
+
+os.close(fd1)
+print('done')
+" >> "$seqres.full" 2>&1 || _fail "SMB byte-range lock contract failed"
+
+unlink "$TESTFILE" 2>/dev/null || true
+echo "SMB2 lock PDU coverage OK"
+status=0
+exit

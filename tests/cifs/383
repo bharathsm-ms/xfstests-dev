@@ -1,0 +1,31 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-2.0
+# CIFS: Minshall+French (MF) symlink deep operations
+#
+# Kernel code exercised
+#   link.c  (cifs_create_mf_symlink, cifs_query_mf_symlink,
+#            cifs_symlink, cifs_follow_link)
+
+. ./common/preamble
+. ./common/rc
+
+_begin_fstest auto quick
+
+[ "$FSTYP" = "cifs" ] || _notrun "requires CIFS"
+[ "$(id -u)" = 0 ] || _notrun "root required"
+[ -n "$TEST_DEV" ] || _notrun "TEST_DEV not set"
+[ -n "$CIFS_CRED_FILE" ] || _notrun "CIFS_CRED_FILE not set"
+
+. ./common/cifs_test
+_cifs_test_init
+command -v python3 >/dev/null || _notrun "python3 required"
+_cifs_test_mount 'vers=3.1.1,mfsymlinks'
+_cifs_test_workspace "$CIFS_TEST_MNT"
+_cifs_test_symlinks "$CIFS_TEST_WORK" >> "$seqres.full" 2>&1
+result=$?
+[ "$result" -ne 77 ] || _notrun "MF symlink creation unsupported"
+[ "$result" -eq 0 ] || _fail "MF symlink lifecycle failed"
+
+echo "Silence is golden"
+status=0
+exit

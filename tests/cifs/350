@@ -1,0 +1,71 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-2.0
+#
+# CIFS: writev/pwritev — exercise cifs_file_write_iter, cifs_loose_read_iter
+#
+# Exercises: cifs_file_write_iter, cifs_loose_read_iter
+
+. ./common/preamble
+. ./common/rc
+
+_begin_fstest auto quick
+
+[ "$FSTYP" = "cifs" ] || _notrun "requires CIFS"
+[ "$(id -u)" = 0 ] || _notrun "root required"
+[ -n "$TEST_DIR" ] || _notrun "TEST_DIR not set"
+
+. ./common/cifs_test
+_cifs_test_init
+command -v python3 >/dev/null || _notrun "python3 required"
+_cifs_test_workspace
+
+TESTFILE="$CIFS_TEST_WORK/data"
+
+# writev with multiple iovecs via Python
+python3 -c "
+import os
+
+path = '$TESTFILE'
+fd = os.open(path, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o644)
+# writev with multiple buffers
+buffers = [b'chunk1_' * 100, b'chunk2_' * 200, b'chunk3_' * 300]
+total = os.writev(fd, buffers)
+expected = bytearray(b''.join(buffers))
+assert total == len(expected), 'short writev'
+os.fsync(fd)
+print(f'writev wrote {total} bytes')
+os.close(fd)
+
+# readv with multiple buffers
+fd = os.open(path, os.O_RDONLY)
+bufs = [bytearray(700), bytearray(1400), bytearray(2100)]
+total = os.readv(fd, bufs)
+assert total == len(expected), 'short readv'
+assert b''.join(bufs) == expected, 'readv data mismatch'
+print(f'readv read {total} bytes')
+os.close(fd)
+
+# pwritev at offset
+fd = os.open(path, os.O_WRONLY)
+payload = b'pwrite_data_' * 50
+assert os.pwritev(fd, [payload], 1024) == len(payload), 'short pwritev'
+expected[1024:1024+len(payload)] = payload
+os.fsync(fd)
+print('pwritev at offset 1024 ok')
+os.close(fd)
+
+# preadv at offset
+fd = os.open(path, os.O_RDONLY)
+bufs = [bytearray(600)]
+n = os.preadv(fd, bufs, 1024)
+assert n == 600, 'short preadv'
+assert bufs[0] == expected[1024:1624], 'preadv data mismatch'
+assert os.pread(fd, len(expected) + 1, 0) == expected, 'final vector I/O data mismatch'
+print(f'preadv at offset 1024 read {n} bytes')
+os.close(fd)
+" >> "$seqres.full" 2>&1 || _fail "vector I/O validation failed"
+
+unlink "$TESTFILE" 2>/dev/null || true
+echo "writev/pwritev coverage OK"
+status=0
+exit

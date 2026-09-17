@@ -1,0 +1,75 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-2.0
+# CIFS: I/O on invalid fd modes — write to O_RDONLY, read from O_WRONLY after close
+# Exercises: file.c error paths, dir.c cifs_create error paths
+
+. ./common/preamble
+. ./common/rc
+_begin_fstest auto quick
+
+[ "$FSTYP" = "cifs" ] || _notrun "requires CIFS"
+[ "$(id -u)" = 0 ] || _notrun "root required"
+[ -n "$TEST_DIR" ] || _notrun "TEST_DIR not set"
+. ./common/cifs_test
+_cifs_test_init
+command -v python3 >/dev/null || _notrun "python3 required"
+_cifs_test_workspace
+
+F="$CIFS_TEST_WORK/data"
+echo "test-data" > "$F" || _fail "create invalid-fd fixture"
+
+python3 -c "
+import os, errno
+
+path = '$F'
+
+# Write to O_RDONLY fd
+fd = os.open(path, os.O_RDONLY)
+try:
+    os.write(fd, b'should fail')
+    raise RuntimeError('write to O_RDONLY succeeded')
+except OSError as e:
+    assert e.errno == errno.EBADF, e
+    print(f'write to O_RDONLY: {e.strerror} (errno {e.errno}) — expected')
+os.close(fd)
+
+# Read from O_WRONLY fd
+fd = os.open(path, os.O_WRONLY)
+try:
+    data = os.read(fd, 4096)
+    raise RuntimeError('read from O_WRONLY succeeded')
+except OSError as e:
+    assert e.errno == errno.EBADF, e
+    print(f'read from O_WRONLY: {e.strerror} (errno {e.errno}) — expected')
+os.close(fd)
+
+# I/O after close (use dup to get stale fd)
+fd = os.open(path, os.O_RDWR)
+fd2 = os.dup(fd)
+os.close(fd2)
+try:
+    os.write(fd2, b'after close')
+    raise RuntimeError('write after close succeeded')
+except OSError as e:
+    assert e.errno == errno.EBADF, e
+    print(f'write after close: {e.strerror} — expected')
+
+os.close(fd)
+
+# Open non-existent file without O_CREAT
+try:
+    fd = os.open(path + '.nonexistent_$$', os.O_RDONLY)
+    os.close(fd)
+    raise RuntimeError('open non-existent succeeded')
+except OSError as e:
+    assert e.errno == errno.ENOENT, e
+    print(f'open non-existent: {e.strerror} — expected')
+
+print('done')
+" >> "$seqres.full" 2>&1 || _fail "invalid descriptor error contract failed"
+[ "$(cat "$F")" = test-data ] || _fail "failed operations changed file content"
+
+unlink "$F" 2>/dev/null || true
+echo "I/O error paths OK"
+status=0
+exit

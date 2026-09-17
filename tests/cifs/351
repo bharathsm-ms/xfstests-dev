@@ -1,0 +1,59 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-2.0
+#
+# CIFS: SMB2 set_ea — extended attribute operations via SMB2 path
+#
+# Exercises: SMB2_set_ea, smb2_ioctl_query_info (query EA path)
+
+. ./common/preamble
+. ./common/rc
+
+_begin_fstest auto quick
+
+[ "$FSTYP" = "cifs" ] || _notrun "requires CIFS"
+[ "$(id -u)" = 0 ] || _notrun "root required"
+[ -n "$TEST_DIR" ] || _notrun "TEST_DIR not set"
+command -v setfattr >/dev/null 2>&1 || _notrun "setfattr not found"
+command -v getfattr >/dev/null 2>&1 || _notrun "getfattr not found"
+
+. ./common/cifs_test
+_cifs_test_init
+command -v python3 >/dev/null || _notrun "python3 required"
+_cifs_test_workspace
+echo ea-test > "$CIFS_TEST_WORK/data" || _fail "create EA fixture"
+python3 - "$CIFS_TEST_WORK/data" >> "$seqres.full" 2>&1 <<'PY'
+import errno, os, sys
+path = sys.argv[1]
+try:
+	os.setxattr(path, 'user.probe', b'probe', os.XATTR_CREATE)
+except OSError as error:
+	if error.errno == errno.EOPNOTSUPP:
+		sys.exit(77)
+	raise
+os.removexattr(path, 'user.probe')
+expected = {f'user.ea_test_{index}': f'value_{index}'.encode() for index in range(1, 6)}
+for name, value in expected.items():
+	os.setxattr(path, name, value, os.XATTR_CREATE)
+	assert os.getxattr(path, name) == value
+expected['user.ea_test_1'] = b'new_value_1'
+os.setxattr(path, 'user.ea_test_1', expected['user.ea_test_1'], os.XATTR_REPLACE)
+os.removexattr(path, 'user.ea_test_5')
+del expected['user.ea_test_5']
+try:
+	os.getxattr(path, 'user.ea_test_5')
+except OSError as error:
+	assert error.errno == errno.ENODATA, error
+else:
+	raise RuntimeError('removed attribute still exists')
+expected['user.large_ea'] = bytes(range(256)) * 4
+os.setxattr(path, 'user.large_ea', expected['user.large_ea'], os.XATTR_CREATE)
+assert set(expected) <= set(os.listxattr(path)), 'attributes missing from list'
+for name, value in expected.items():
+	assert os.getxattr(path, name) == value, 'attribute content mismatch'
+PY
+result=$?
+[ "$result" -ne 77 ] || _notrun "user extended attributes unsupported"
+[ "$result" -eq 0 ] || _fail "extended attribute lifecycle failed"
+echo "SMB2 set_ea coverage OK"
+status=0
+exit

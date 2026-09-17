@@ -1,0 +1,94 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-2.0
+#
+# CIFS: SMB2 change_notify — directory change notification
+#
+# Behavior under test
+# - Open a directory for notify (CIFS_IOC_NOTIFY or inotify)
+# - Create/delete files in that directory
+# - Verify notification events are received
+# - Verify no crash on notify cancel (close fd while notify pending)
+#
+# Kernel code exercised
+#   smb2pdu.c (SMB2_change_notify)
+#   cifsfs.c (smb3_notify, cifs_dir_notify)
+
+. ./common/preamble
+. ./common/rc
+
+_begin_fstest auto quick
+
+[ "$FSTYP" = "cifs" ] || _notrun "requires CIFS"
+[ "$(id -u)" = 0 ] || _notrun "root required"
+[ -n "$TEST_DIR" ] || _notrun "TEST_DIR not set"
+
+. ./common/cifs_test
+_cifs_test_init
+command -v python3 >/dev/null || _notrun "python3 required"
+_cifs_test_mount 'vers=3.1.1,cache=none'
+_cifs_test_workspace "$CIFS_TEST_MNT"
+first=$CIFS_TEST_WORK
+_cifs_test_mount 'vers=3.1.1,cache=none'
+second="$CIFS_TEST_MNT/${first##*/}"
+timeout --kill-after=5s 45 python3 - "$first" "$second" >> "$seqres.full" 2>&1 <<'PY'
+import errno, os, signal, subprocess, sys, time
+from pathlib import Path
+worker = '''
+import errno, fcntl, os, struct, sys
+descriptor = os.open(sys.argv[1], os.O_RDONLY | os.O_DIRECTORY)
+try:
+	try:
+		fcntl.ioctl(descriptor, 0x4005cf09, struct.pack('=IB', 1, 0))
+	except OSError as error:
+		if error.errno in (errno.EOPNOTSUPP, errno.ENOTTY):
+			sys.exit(77)
+		raise
+finally:
+	os.close(descriptor)
+'''
+def pending(process):
+	deadline = time.monotonic() + 10
+	while time.monotonic() < deadline:
+		if process.poll() is not None:
+			if process.returncode == 77:
+				sys.exit(77)
+			raise AssertionError('notify completed before any remote change')
+		fields = Path(f'/proc/{process.pid}/syscall').read_text().split()
+		if len(fields) > 3 and fields[0] != 'running' and int(fields[2], 0) == 0x4005cf09:
+			return
+		time.sleep(0.02)
+	raise AssertionError('notify ioctl never became pending')
+
+for cancel in (False, True):
+	process = subprocess.Popen([sys.executable, '-c', worker, sys.argv[1]])
+	try:
+		pending(process)
+		if cancel:
+			process.terminate()
+			assert process.wait(timeout=10) == -signal.SIGTERM
+		else:
+			deadline = time.monotonic() + 10
+			count = 0
+			while process.poll() is None and time.monotonic() < deadline:
+				target = Path(sys.argv[2]) / f'event-{count}'
+				assert target.write_bytes(b'notify-data') == 11
+				count += 1
+				try:
+					process.wait(timeout=0.1)
+				except subprocess.TimeoutExpired:
+					pass
+			assert count > 0 and process.wait(timeout=1) == 0
+	finally:
+		if process.poll() is None:
+			process.kill()
+		process.wait(timeout=10)
+print('Remote change notification and pending-request cancellation verified')
+PY
+result=$?
+[ "$result" -ne 77 ] || _notrun "CIFS change-notify ioctl unsupported"
+[ "$result" -eq 0 ] || _fail "remote notify or cancellation failed"
+
+echo "SMB2 change_notify OK"
+
+status=0
+exit

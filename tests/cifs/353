@@ -1,0 +1,49 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-2.0
+#
+# CIFS: SFU special file types + unix attrs via inode ops
+#
+# Exercises: cifs_sfu_type, cifs_sfu_mode, __cifs_sfu_make_node,
+#            cifs_sfu_make_node, wire_filetype_to_posix, wire_mode_to_posix
+
+. ./common/preamble
+. ./common/rc
+
+_begin_fstest auto quick
+
+[ "$FSTYP" = "cifs" ] || _notrun "requires CIFS"
+[ "$(id -u)" = 0 ] || _notrun "root required"
+[ -n "$TEST_DEV" ] || _notrun "TEST_DEV not set"
+[ -n "$CIFS_CRED_FILE" ] || _notrun "CIFS_CRED_FILE not set"
+
+. ./common/cifs_test
+_cifs_test_init
+command -v python3 >/dev/null || _notrun "python3 required"
+_cifs_test_mount 'vers=3.1.1,sfu,nodev'
+_cifs_test_workspace "$CIFS_TEST_MNT"
+first=$CIFS_TEST_WORK
+_cifs_test_mount 'vers=3.1.1,sfu,nodev'
+second="$CIFS_TEST_MNT/${first##*/}"
+python3 - "$first" "$second" >> "$seqres.full" 2>&1 <<'PY'
+import errno, os, stat, sys
+for name, kind, device in (('block', stat.S_IFBLK, os.makedev(1, 0)),
+						   ('char', stat.S_IFCHR, os.makedev(1, 3)),
+						   ('fifo', stat.S_IFIFO, 0)):
+	try:
+		os.mknod(os.path.join(sys.argv[1], name), kind | 0o600, device)
+	except OSError as error:
+		if error.errno == errno.EOPNOTSUPP:
+			sys.exit(77)
+		raise
+	for root in sys.argv[1:]:
+		metadata = os.lstat(os.path.join(root, name))
+		assert stat.S_IFMT(metadata.st_mode) == kind, name + ': node type mismatch'
+		assert metadata.st_rdev == device, name + ': device ID mismatch'
+PY
+result=$?
+[ "$result" -ne 77 ] || _notrun "requested SFU node type unsupported"
+[ "$result" -eq 0 ] || _fail "SFU node representation mismatch"
+
+echo "SFU special file types OK"
+status=0
+exit

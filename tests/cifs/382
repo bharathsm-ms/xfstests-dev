@@ -1,0 +1,79 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-2.0
+# CIFS: xattr creation_time, attrib, and DOS attributes
+#
+# Kernel code exercised
+#   xattr.c     (cifs_attrib_get, cifs_attrib_set,
+#                cifs_creation_time_get, cifs_creation_time_set)
+
+. ./common/preamble
+. ./common/rc
+
+_begin_fstest auto quick
+
+[ "$FSTYP" = "cifs" ] || _notrun "requires CIFS"
+[ "$(id -u)" = 0 ] || _notrun "root required"
+[ -n "$TEST_DEV" ] || _notrun "TEST_DEV not set"
+[ -n "$CIFS_CRED_FILE" ] || _notrun "CIFS_CRED_FILE not set"
+command -v getfattr >/dev/null 2>&1 || _notrun "getfattr required"
+command -v setfattr >/dev/null 2>&1 || _notrun "setfattr required"
+
+. ./common/cifs_test
+_cifs_test_init
+command -v python3 >/dev/null || _notrun "python3 required"
+_cifs_test_mount 'vers=3.1.1,cache=none,actimeo=0,closetimeo=0'
+_cifs_test_workspace "$CIFS_TEST_MNT"
+python3 - "$CIFS_TEST_WORK" >> "$seqres.full" 2>&1 <<'PY'
+import errno, os, struct, sys
+from pathlib import Path
+root = Path(sys.argv[1])
+path = root / 'data'
+expected = b'DOS-attribute-data\n'
+assert path.write_bytes(expected) == len(expected)
+attribute = 'user.cifs.dosattrib'
+creation = 'user.cifs.creationtime'
+try:
+        original = os.getxattr(path, attribute)
+        original_time = os.getxattr(path, creation)
+except OSError as error:
+        if error.errno == errno.EOPNOTSUPP:
+                sys.exit(77)
+        raise
+assert len(original) == 4 and len(original_time) == 8
+flags = struct.unpack('=I', original)[0]
+try:
+        wanted = (flags | 0x22) & ~0x80
+        os.setxattr(path, attribute, struct.pack('=I', wanted))
+        assert struct.unpack('=I', os.getxattr(path, attribute))[0] == wanted
+        timestamp = (1700000000 + 11644473600) * 10000000
+        os.setxattr(path, creation, struct.pack('=Q', timestamp))
+        assert struct.unpack('=Q', os.getxattr(path, creation))[0] == timestamp
+        assert len(os.getxattr(root, creation)) == 8
+        assert struct.unpack('=I', os.getxattr(root, attribute))[0] & 0x10
+        for name in (attribute, creation):
+                try:
+                        os.setxattr(path, name, b'bad')
+                except OSError as error:
+                        assert error.errno == errno.ERANGE
+                else:
+                        raise AssertionError('invalid xattr size accepted')
+        os.setxattr(path, attribute, struct.pack('=I', wanted | 1))
+        assert struct.unpack('=I', os.getxattr(path, attribute))[0] & 1
+        try:
+                descriptor = os.open(path, os.O_WRONLY)
+        except OSError as error:
+                assert error.errno == errno.EACCES
+        else:
+                os.close(descriptor)
+                raise AssertionError('DOS read-only file opened for writing')
+finally:
+        os.setxattr(path, attribute, original)
+assert path.read_bytes() == expected
+PY
+result=$?
+[ "$result" -ne 77 ] || _notrun "CIFS DOS attribute xattrs unsupported"
+[ "$result" -eq 0 ] || _fail "DOS attribute or creation-time contract failed"
+
+echo "Silence is golden"
+status=0
+exit

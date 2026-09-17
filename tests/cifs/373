@@ -1,0 +1,43 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-2.0
+# CIFS: actimeo=0 with no leases requires fresh metadata queries
+# Exercises: inode.c (fresh stat paths), smb2inode.c (no-cache query)
+
+. ./common/preamble
+. ./common/rc
+_begin_fstest auto quick
+
+[ "$FSTYP" = "cifs" ] || _notrun "requires CIFS"
+[ "$(id -u)" = 0 ] || _notrun "root required"
+[ -n "$TEST_DEV" ] || _notrun "TEST_DEV not set"
+[ -n "$CIFS_CRED_FILE" ] || _notrun "CIFS_CRED_FILE not set"
+
+. ./common/cifs_test
+. ./common/cifs_debug
+_cifs_test_init
+_cifs_test_mount 'vers=3.1.1,actimeo=0,nolease,cache=none,closetimeo=0'
+_cifs_test_workspace "$CIFS_TEST_MNT"
+F="$CIFS_TEST_WORK/data"
+relative=${CIFS_TEST_WORK##*/}
+printf 'attribute-test\n' > "$F" || _fail "create attribute fixture"
+before=$(_cifs_stat "$TEST_DEV" QueryInfos:) || _notrun "per-share QueryInfos counter unavailable"
+
+# Multiple stats — each should hit the server (no caching)
+for iteration in $(seq 1 10); do
+	size=$(stat -c %s "$F") || _fail "uncached stat failed"
+	[ "$size" -eq 15 ] || _fail "uncached stat returned wrong size"
+done
+
+# Check QueryInfos count
+after=$(_cifs_stat "$TEST_DEV" QueryInfos:) || _fail "read post-stat QueryInfos counter"
+qi=$((after - before))
+echo "QueryInfos after 10 stats: $qi" >> "$seqres.full"
+[ "$qi" -ge 10 ] || _fail "actimeo=0 without leases did not query each stat"
+_cifs_test_mount 'vers=3.1.1,cache=none,closetimeo=0'
+printf 'changed-from-other-mount\n' > "$CIFS_TEST_MNT/$relative/data" || _fail "second-mount write failed"
+size=$(stat -c %s "$F") || _fail "stat after competing update failed"
+[ "$size" -eq 25 ] || _fail "actimeo=0 returned stale file size"
+[ "$(cat "$F")" = changed-from-other-mount ] || _fail "competing update data mismatch"
+echo "actimeo=0 metadata queries OK"
+status=0
+exit

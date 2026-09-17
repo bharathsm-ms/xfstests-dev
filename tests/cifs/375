@@ -1,0 +1,59 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-2.0
+# CIFS: Large I/O exceeding rsize/wsize — split/retry transport paths
+# Exercises: transport.c (split/retry), smb2ops.c (wp_retry_size)
+
+. ./common/preamble
+. ./common/rc
+_begin_fstest auto quick
+. ./common/cifs_test
+_cifs_test_init
+
+[ "$FSTYP" = "cifs" ] || _notrun "requires CIFS"
+[ "$(id -u)" = 0 ] || _notrun "root required"
+[ -n "$TEST_DIR" ] || _notrun "TEST_DIR not set"
+_cifs_test_workspace
+F="$CIFS_TEST_WORK/data"
+
+# Write larger than typical rsize (4MB default)
+echo "write 8M" >> "$seqres.full"
+dd if=/dev/urandom of="$tmp.expected" bs=8M count=1 status=none || _fail "prepare 8M payload"
+dd if="$tmp.expected" of="$F" bs=8M conv=fsync status=none || _fail "8M write"
+
+# Read in one shot
+dd if="$F" of="$tmp.read" bs=8M status=none || _fail "8M read"
+cmp "$tmp.expected" "$tmp.read" || _fail "8M data mismatch"
+
+# Write 16M to definitely exceed wsize split boundary
+echo "write 16M" >> "$seqres.full"
+dd if=/dev/urandom of="$tmp.expected" bs=16M count=1 status=none || _fail "prepare 16M payload"
+dd if="$tmp.expected" of="$F" bs=16M conv=fsync status=none || _fail "16M write"
+
+# Verify integrity
+cmp "$tmp.expected" "$F" || _fail "16M data mismatch"
+
+# Many small I/O mixed with large I/O (exercises buffer splitting)
+python3 -c "
+import os
+expected = bytearray(open('$tmp.expected', 'rb').read())
+fd = os.open('$F', os.O_RDWR)
+# Write 1 byte at offset 0
+assert os.pwrite(fd, b'x', 0) == 1
+expected[0] = ord('x')
+# Read 8MB from offset 0
+data = os.pread(fd, 8*1024*1024, 0)
+assert data == expected[:8*1024*1024]
+print(f'pread 8M: got {len(data)} bytes')
+# Write 5MB at offset 1MB
+assert os.pwrite(fd, b'y' * (5*1024*1024), 1024*1024) == 5*1024*1024
+expected[1024*1024:6*1024*1024] = b'y' * (5*1024*1024)
+os.fsync(fd)
+assert os.pread(fd, len(expected), 0) == expected
+print('pwrite 5M at 1M done')
+os.close(fd)
+" >> "$seqres.full" 2>&1 || _fail "mixed large I/O validation failed"
+
+unlink "$F" 2>/dev/null || true
+echo "large I/O split OK"
+status=0
+exit

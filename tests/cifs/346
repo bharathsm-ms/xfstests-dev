@@ -1,0 +1,88 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-2.0
+#
+# CIFS: fallocate modes — ZERO_RANGE, COLLAPSE, INSERT, KEEP_SIZE
+#
+# Behavior under test
+# - fallocate with FALLOC_FL_ZERO_RANGE
+# - fallocate with FALLOC_FL_KEEP_SIZE
+# - fallocate with FALLOC_FL_COLLAPSE_RANGE (if supported)
+# - fallocate with FALLOC_FL_INSERT_RANGE (if supported)
+# - Verify data integrity after each operation
+# - Skip gracefully if server doesn't support a specific mode
+#
+# Kernel code exercised
+#   smb2ops.c (smb3_fallocate, smb3_zero_range, smb3_collapse_range,
+#              smb3_insert_range, smb3_simple_fallocate)
+
+. ./common/preamble
+. ./common/rc
+
+_begin_fstest auto quick
+
+[ "$FSTYP" = "cifs" ] || _notrun "requires CIFS"
+[ "$(id -u)" = 0 ] || _notrun "root required"
+[ -n "$TEST_DIR" ] || _notrun "TEST_DIR not set"
+command -v python3 >/dev/null || _notrun "python3 required"
+. ./common/cifs_test
+_cifs_test_init
+_cifs_test_workspace
+TESTFILE="$CIFS_TEST_WORK/data"
+python3 - "$TESTFILE" >> "$seqres.full" 2>&1 <<'PY'
+import ctypes, errno, os, sys
+library = ctypes.CDLL(None, use_errno=True)
+allocate = library.fallocate64
+allocate.argtypes = (ctypes.c_int, ctypes.c_int, ctypes.c_longlong, ctypes.c_longlong)
+allocate.restype = ctypes.c_int
+original = os.urandom(65536)
+successes = 0
+for name, mode, offset, length in (
+	('KEEP_SIZE', 1, 65536, 4096),
+	('ZERO_RANGE', 16, 4096, 4096),
+	('PUNCH_HOLE', 3, 8192, 4096),
+	('COLLAPSE_RANGE', 8, 4096, 4096),
+	('INSERT_RANGE', 32, 4096, 4096),
+):
+	descriptor = os.open(sys.argv[1], os.O_RDWR | os.O_CREAT | os.O_TRUNC, 0o600)
+	try:
+		assert os.write(descriptor, original) == len(original)
+		os.fsync(descriptor)
+		result = allocate(descriptor, mode, offset, length)
+		if result:
+			error = ctypes.get_errno()
+			if error != errno.EOPNOTSUPP:
+				raise OSError(error, name)
+			assert os.pread(descriptor, len(original) + 1, 0) == original
+			print(name + ': unsupported')
+			continue
+		expected = original
+		if mode in (16, 3):
+			expected = original[:offset] + bytes(length) + original[offset+length:]
+		elif mode == 8:
+			expected = original[:offset] + original[offset+length:]
+		elif mode == 32:
+			expected = original[:offset] + bytes(length) + original[offset:]
+		os.fsync(descriptor)
+		assert os.fstat(descriptor).st_size == len(expected), name + ': size mismatch'
+		assert os.pread(descriptor, len(expected) + 1, 0) == expected, name + ': data mismatch'
+		successes += 1
+		print(name + ': size/data verified')
+	finally:
+		os.close(descriptor)
+sys.exit(0 if successes else 77)
+PY
+result=$?
+[ "$result" -ne 77 ] || _notrun "no tested fallocate modes supported"
+[ "$result" -eq 0 ] || _fail "fallocate size/data contract failed"
+
+# No crash check
+if dmesg | tail -5 | grep -qiE 'BUG:|kernel panic|Oops:'; then
+	_fail "kernel crash during fallocate"
+fi
+
+unlink "$TESTFILE" 2>/dev/null || true
+
+echo "fallocate modes coverage OK"
+
+status=0
+exit

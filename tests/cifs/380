@@ -1,0 +1,43 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-2.0
+# CIFS: ACL get/set deep — exercise full ACL lifecycle via cifsacl xattr
+#
+# Kernel code exercised
+#   cifsacl.c   (get_cifs_acl, set_cifs_acl, get_cifs_acl_by_fid,
+#                get_cifs_acl_by_path, replace_sids_and_copy_aces,
+#                cifs_copy_ace, setup_special_user_owner_ACE)
+#   smb2ops.c   (get_smb2_acl, set_smb2_acl)
+
+. ./common/preamble
+. ./common/rc
+
+_begin_fstest auto quick
+
+[ "$FSTYP" = "cifs" ] || _notrun "requires CIFS"
+[ "$(id -u)" = 0 ] || _notrun "root required"
+[ -n "$TEST_DEV" ] || _notrun "TEST_DEV not set"
+[ -n "$CIFS_CRED_FILE" ] || _notrun "CIFS_CRED_FILE not set"
+command -v getfattr >/dev/null 2>&1 || _notrun "getfattr required"
+command -v setfattr >/dev/null 2>&1 || _notrun "setfattr required"
+
+. ./common/cifs_test
+_cifs_test_init
+command -v python3 >/dev/null || _notrun "python3 required"
+_cifs_test_mount 'vers=3.1.1,cifsacl,actimeo=0'
+_cifs_test_workspace "$CIFS_TEST_MNT"
+TDIR=$CIFS_TEST_WORK
+echo source-data > "$TDIR/source" || _fail "create ACL source"
+chmod 0644 "$TDIR/source" || _fail "set source permissions"
+for number in $(seq 1 10); do
+        target="$TDIR/target-$number"
+        echo "target-$number" > "$target" || _fail "create ACL target"
+        _cifs_test_acl_copy "$TDIR/source" "$target" >> "$seqres.full" 2>&1 || _fail "file DACL copy mismatch"
+        [ "$(cat "$target")" = "target-$number" ] || _fail "DACL copy changed target data"
+done
+mkdir "$TDIR/directory" "$TDIR/copy" || _fail "create directory ACL fixtures"
+_cifs_test_acl_copy "$TDIR/directory" "$TDIR/copy" >> "$seqres.full" 2>&1 || _fail "directory DACL copy mismatch"
+[ "$(cat "$TDIR/source")" = source-data ] || _fail "DACL copy changed source data"
+
+echo "Silence is golden"
+status=0
+exit

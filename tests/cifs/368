@@ -1,0 +1,61 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-2.0
+# CIFS: Permission denied paths — access errors, RO write, busy unlink
+# Exercises: inode.c error paths (cifs_rename_pending_delete), dir.c errors
+
+. ./common/preamble
+. ./common/rc
+_begin_fstest auto quick
+
+[ "$FSTYP" = "cifs" ] || _notrun "requires CIFS"
+[ "$(id -u)" = 0 ] || _notrun "root required"
+[ -n "$TEST_DEV" ] || _notrun "TEST_DEV not set"
+[ -n "$TEST_DIR" ] || _notrun "TEST_DIR not set"
+[ -n "$CIFS_CRED_FILE" ] || _notrun "CIFS_CRED_FILE not set"
+
+. ./common/cifs_test
+_cifs_test_init
+command -v python3 >/dev/null || _notrun "python3 required"
+_cifs_test_workspace
+work=$CIFS_TEST_WORK
+echo busy > "$work/data" || _fail "create fixture"
+_cifs_test_mount 'vers=3.1.1,ro'
+readonly="$CIFS_TEST_MNT/${work##*/}"
+
+python3 - "$work" "$readonly" >> "$seqres.full" 2>&1 <<'PY'
+import errno, os, pathlib, sys
+work, readonly = map(pathlib.Path, sys.argv[1:])
+
+def rejected(expected, operation, *arguments):
+	try:
+		operation(*arguments)
+	except OSError as error:
+		assert error.errno == expected, error
+	else:
+		raise RuntimeError('invalid operation succeeded')
+
+assert (readonly / 'data').read_bytes() == b'busy\n'
+rejected(errno.EROFS, os.open, readonly / 'new', os.O_CREAT | os.O_WRONLY, 0o600)
+rejected(errno.EROFS, os.chmod, readonly / 'data', 0o600)
+descriptor = os.open(work / 'data', os.O_RDWR)
+try:
+	os.unlink(work / 'data')
+	assert not (work / 'data').exists()
+	assert os.read(descriptor, 4096) == b'busy\n'
+finally:
+	os.close(descriptor)
+directory = work / 'nonempty'
+directory.mkdir()
+(directory / 'child').write_bytes(b'child')
+rejected(errno.ENOTEMPTY, os.rmdir, directory)
+assert (directory / 'child').read_bytes() == b'child'
+source, destination = work / 'source', work / 'destination'
+source.write_bytes(b'source')
+destination.write_bytes(b'destination')
+os.replace(source, destination)
+assert not source.exists() and destination.read_bytes() == b'source'
+PY
+[ "$?" -eq 0 ] || _fail "read-only/delete/rename contract failed"
+echo "permission denied paths OK"
+status=0
+exit

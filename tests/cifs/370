@@ -1,0 +1,67 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-2.0
+# CIFS: Checked concurrent create/read/stat/unlink and rename workloads
+
+. ./common/preamble
+. ./common/rc
+_begin_fstest auto quick
+
+[ "$FSTYP" = "cifs" ] || _notrun "requires CIFS"
+[ "$(id -u)" = 0 ] || _notrun "root required"
+[ -n "$TEST_DIR" ] || _notrun "TEST_DIR not set"
+. ./common/cifs_test
+_cifs_test_init
+_cifs_test_workspace
+
+dmesg_before=$(dmesg | wc -l)
+F="$CIFS_TEST_WORK/data"
+
+# Rapid interleaved ops to hit different SMB2 response validation paths
+echo "rapid interleaved ops" >> "$seqres.full"
+for worker in $(seq 1 50); do
+	(echo "$worker" > "$F.$worker") &
+	_cifs_test_children+=("$!")
+done
+_cifs_test_wait
+
+for worker in $(seq 1 50); do
+	([ "$(cat "$F.$worker")" = "$worker" ]) &
+	_cifs_test_children+=("$!")
+done
+_cifs_test_wait
+
+for worker in $(seq 1 50); do
+	([ "$(stat -c %s "$F.$worker")" -eq "$((${#worker} + 1))" ]) &
+	_cifs_test_children+=("$!")
+done
+_cifs_test_wait
+
+# Concurrent create+stat+unlink races
+for worker in $(seq 1 50); do
+	(echo "x" > "$F.race.$worker" && stat "$F.race.$worker" >/dev/null && rm "$F.race.$worker") &
+	_cifs_test_children+=("$!")
+done
+_cifs_test_wait
+
+# Sequential rename round-trips
+echo "a" > "$F.ren_src" || _fail "seed rename fixture"
+for iteration in $(seq 1 20); do
+	mv "$F.ren_src" "$F.ren_dst" || _fail "rename destination failed"
+	[ "$(cat "$F.ren_dst")" = a ] || _fail "renamed data mismatch"
+	mv "$F.ren_dst" "$F.ren_src" || _fail "rename source failed"
+done
+rm "$F.ren_src" || _fail "remove rename fixture"
+
+for worker in $(seq 1 50); do rm "$F.$worker" || _fail "remove concurrent fixture"; done
+[ -z "$(ls -A "$CIFS_TEST_WORK")" ] || _fail "unexpected files after workload"
+
+# No crash
+dmesg_after=$(dmesg | wc -l)
+if [ $((dmesg_after - dmesg_before)) -gt 0 ]; then
+	dmesg | tail -n $((dmesg_after - dmesg_before)) | grep -qiE 'BUG:|panic|Oops:' && \
+		_fail "crash during validation stress"
+fi
+
+echo "SMB2 validation stress OK"
+status=0
+exit

@@ -1,0 +1,50 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-2.0
+# CIFS: Negotiated dialect, signing and encryption mount controls
+
+. ./common/preamble
+. ./common/rc
+_begin_fstest auto quick
+
+[ "$FSTYP" = "cifs" ] || _notrun "requires CIFS"
+[ "$(id -u)" = 0 ] || _notrun "root required"
+[ -n "$TEST_DEV" ] || _notrun "TEST_DEV not set"
+[ -n "$CIFS_CRED_FILE" ] || _notrun "CIFS_CRED_FILE not set"
+
+. ./common/cifs_test
+_cifs_test_init
+command -v python3 >/dev/null || _notrun "python3 required"
+dmesg_before=$(dmesg | wc -l)
+
+# Mount with different negotiate options to trigger different context parsing
+for mount_opts in \
+	"vers=3.1.1,sec=ntlmsspi" \
+	"vers=3.1.1,seal" \
+	"vers=3.0,sec=ntlmsspi" \
+	"vers=3.0" \
+	"vers=2.1"; do
+	echo "negotiate: $mount_opts" >> "$seqres.full"
+	_cifs_test_mount "$mount_opts"
+	_cifs_test_workspace "$CIFS_TEST_MNT"
+	echo hello > "$CIFS_TEST_WORK/data" || _fail "negotiated mount write failed"
+	[ "$(cat "$CIFS_TEST_WORK/data")" = hello ] || _fail "negotiated mount data mismatch"
+	case "$mount_opts" in
+		vers=3.1.1*) dialect=0x311 ;;
+		vers=3.0*) dialect=0x300 ;;
+		vers=2.1*) dialect=0x210 ;;
+	esac
+	_cifs_test_ioctl_info "$CIFS_TEST_WORK/data" "$dialect" >> "$seqres.full" 2>&1 || _fail "negotiated dialect mismatch"
+	case "$mount_opts" in *ntlmsspi*) _cifs_test_mount_option sec=ntlmsspi ;; esac
+	case "$mount_opts" in *seal*) _cifs_test_mount_option seal ;; esac
+done
+
+# No crash
+dmesg_after=$(dmesg | wc -l)
+if [ $((dmesg_after - dmesg_before)) -gt 0 ]; then
+	dmesg | tail -n $((dmesg_after - dmesg_before)) | grep -qiE 'BUG:|panic|Oops:' && \
+		_fail "crash during negotiate variations"
+fi
+
+echo "negotiate context decode OK"
+status=0
+exit

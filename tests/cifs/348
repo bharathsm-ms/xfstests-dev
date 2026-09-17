@@ -1,0 +1,136 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-2.0
+#
+# CIFS: readdir deep — large directory + seekdir/telldir + concurrent ops
+#
+# Behavior under test
+# - Create a directory with 500+ files
+# - Do readdir (ls), verify all files listed
+# - Open dir, read partial entries, seek back, read again
+# - Concurrent readdir + create/unlink
+# - Verify readdir doesn't miss or duplicate entries
+#
+# Kernel code exercised
+#   readdir.c (cifs_readdir, initiate_cifs_search, find_cifs_entry,
+#              cifs_filldir, cifs_dir_notify)
+
+. ./common/preamble
+. ./common/rc
+
+_begin_fstest auto quick
+
+[ "$FSTYP" = "cifs" ] || _notrun "requires CIFS"
+[ "$(id -u)" = 0 ] || _notrun "root required"
+[ -n "$TEST_DIR" ] || _notrun "TEST_DIR not set"
+
+. ./common/cifs_test
+_cifs_test_init
+command -v python3 >/dev/null || _notrun "python3 required"
+command -v gcc >/dev/null || _notrun "gcc required"
+_cifs_test_workspace
+SUB=$CIFS_TEST_WORK
+
+NUM_FILES=500
+
+# ── Create many files ─────────────────────────────────────────
+echo "creating $NUM_FILES files..." >> "$seqres.full"
+for i in $(seq 1 $NUM_FILES); do
+	echo "$i" > "$SUB/file_$(printf '%04d' $i)" || _fail "seed directory entry $i"
+done
+echo "created $NUM_FILES files" >> "$seqres.full"
+
+# ── Test 1: full readdir ─────────────────────────────────────
+echo "test1: full readdir" >> "$seqres.full"
+count=$(ls "$SUB/" 2>/dev/null | wc -l)
+echo "test1: ls returned $count entries (expected $NUM_FILES)" >> "$seqres.full"
+
+[ "$count" -eq "$NUM_FILES" ] || _fail "initial directory count mismatch"
+
+cat > "$tmp.seekdir.c" <<'C'
+#include <dirent.h>
+#include <errno.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+int main(int argc, char **argv)
+{
+	if (argc != 2)
+		return 1;
+	DIR *directory = opendir(argv[1]);
+	if (!directory)
+		return 1;
+	for (int index = 0; index < 10; index++)
+		if (!readdir(directory))
+			return 1;
+	long cookie = telldir(directory);
+	if (cookie < 0)
+		return 1;
+	char *names[502];
+	size_t count = 0;
+	struct dirent *entry;
+	errno = 0;
+	while ((entry = readdir(directory))) {
+		if (count >= 502 || !(names[count] = strdup(entry->d_name)))
+			return 1;
+		count++;
+	}
+	if (errno || count != 492)
+		return 1;
+	seekdir(directory, cookie);
+	for (size_t index = 0; index < count; index++) {
+		entry = readdir(directory);
+		if (!entry || strcmp(entry->d_name, names[index]))
+			return 1;
+		free(names[index]);
+	}
+	errno = 0;
+	if (readdir(directory) || errno)
+		return 1;
+	return closedir(directory) != 0;
+}
+C
+gcc -O2 -Wall -Wextra -Werror "$tmp.seekdir.c" -o "$tmp.seekdir" >> "$seqres.full" 2>&1 || _fail "compile seekdir probe"
+"$tmp.seekdir" "$SUB" >> "$seqres.full" 2>&1 || _fail "seekdir/telldir replay mismatch"
+
+# ── Test 2: readdir with stat ─────────────────────────────────
+echo "test2: readdir+stat" >> "$seqres.full"
+stat_count=$(ls -la "$SUB/" 2>/dev/null | tail -n +4 | wc -l)
+echo "test2: ls -la returned $stat_count entries" >> "$seqres.full"
+
+# ── Test 3: concurrent readdir + create ───────────────────────
+echo "test3: concurrent readdir+create" >> "$seqres.full"
+(
+	trap - EXIT HUP INT QUIT TERM
+	for i in $(seq 501 520); do echo "x" > "$SUB/file_new_$i" || exit 1; done
+) &
+_cifs_test_children+=("$!")
+ls "$SUB/" >> "$seqres.full" 2>&1 || _fail "concurrent readdir"
+ls "$SUB/" >> "$seqres.full" 2>&1 || _fail "concurrent readdir"
+_cifs_test_wait
+
+# ── Test 4: readdir after heavy delete ────────────────────────
+echo "test4: readdir after delete" >> "$seqres.full"
+for i in $(seq 1 100); do
+	unlink "$SUB/file_$(printf '%04d' $i)" || _fail "delete entry $i"
+done
+count2=$(ls "$SUB/" 2>/dev/null | wc -l)
+echo "test4: after deleting 100, remaining=$count2" >> "$seqres.full"
+
+[ "$count2" -eq 420 ] || _fail "post-delete directory count mismatch"
+python3 - "$SUB" >> "$seqres.full" 2>&1 <<'PY'
+import os, pathlib, sys
+root = pathlib.Path(sys.argv[1])
+expected = {f'file_{index:04d}': f'{index}\n'.encode() for index in range(101, 501)}
+expected.update({f'file_new_{index}': b'x\n' for index in range(501, 521)})
+names = os.listdir(root)
+assert len(names) == len(set(names)) and set(names) == set(expected)
+for name, payload in expected.items():
+	assert (root / name).read_bytes() == payload
+PY
+[ "$?" -eq 0 ] || _fail "directory inventory/content mismatch"
+
+echo "readdir deep coverage OK"
+
+status=0
+exit

@@ -1,0 +1,80 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-2.0
+#
+# CIFS: system.cifs_acl xattr — read/write security descriptors via xattr
+#
+# Behavior under test
+# - Mount with cifsacl option
+# - Read system.cifs_acl xattr (getfattr) — exercises get_cifs_acl path
+# - Write system.cifs_acl xattr (setfattr) — exercises set_cifs_acl path
+# - Verify descriptor round-trip and an exact binary user xattr
+#
+# Kernel code exercised
+#   xattr.c (cifs_xattr_get, cifs_xattr_set for system.cifs_acl)
+#   cifsacl.c (get_cifs_acl, set_cifs_acl, parse_sec_desc)
+
+. ./common/preamble
+. ./common/rc
+
+_begin_fstest auto quick
+
+[ "$FSTYP" = "cifs" ] || _notrun "requires CIFS"
+[ "$(id -u)" = 0 ] || _notrun "root required"
+[ -n "$TEST_DEV" ] || _notrun "TEST_DEV not set"
+[ -n "$CIFS_CRED_FILE" ] || _notrun "CIFS_CRED_FILE not set"
+command -v getfattr >/dev/null 2>&1 || _notrun "getfattr not found"
+
+. ./common/cifs_test
+_cifs_test_init
+command -v python3 >/dev/null || _notrun "python3 required"
+_cifs_test_mount 'vers=3.1.1,cifsacl'
+_cifs_test_workspace "$CIFS_TEST_MNT"
+TESTFILE="$CIFS_TEST_WORK/data"
+echo "acl-xattr-test" > "$TESTFILE" 2>>"$seqres.full" || _fail "create file failed"
+python3 - "$TESTFILE" >> "$seqres.full" 2>&1 <<'PY'
+import errno, os, struct, sys
+path = sys.argv[1]
+def permissions(descriptor):
+    assert len(descriptor) >= 20
+    revision, reserved, control, owner, group, sacl, dacl = struct.unpack_from('<BBHIIII', descriptor)
+    assert revision == 1 and control & 0x8000 and control & 4
+    assert 20 <= dacl <= len(descriptor) - 8
+    acl_revision, reserved, acl_size, count, reserved2 = struct.unpack_from('<BBHHH', descriptor, dacl)
+    assert acl_size >= 8 and dacl + acl_size <= len(descriptor)
+    cursor = dacl + 8
+    entries = []
+    for entry in range(count):
+        assert cursor + 4 <= dacl + acl_size
+        kind, flags, size = struct.unpack_from('<BBH', descriptor, cursor)
+        assert size >= 4 and cursor + size <= dacl + acl_size
+        entries.append((kind, flags, descriptor[cursor+4:cursor+size]))
+        cursor += size
+    if all(kind == 0 and flags == 0 for kind, flags, body in entries):
+        entries = list(dict.fromkeys(entries))
+    return revision, control, acl_revision, entries
+
+try:
+    original = os.getxattr(path, 'system.cifs_acl')
+except OSError as error:
+    if error.errno == errno.EOPNOTSUPP:
+        sys.exit(77)
+    raise
+expected = permissions(original)
+os.setxattr(path, 'system.cifs_acl', original)
+assert permissions(os.getxattr(path, 'system.cifs_acl')) == expected, 'descriptor round-trip changed permissions'
+value = bytes(range(256))
+os.setxattr(path, 'user.test_attr', value, os.XATTR_CREATE)
+assert 'user.test_attr' in os.listxattr(path)
+assert os.getxattr(path, 'user.test_attr') == value
+os.removexattr(path, 'user.test_attr')
+with open(path, 'rb') as source:
+    assert source.read() == b'acl-xattr-test\n'
+PY
+result=$?
+[ "$result" -ne 77 ] || _notrun "system.cifs_acl unsupported"
+[ "$result" -eq 0 ] || _fail "ACL or xattr round-trip failed"
+
+echo "system.cifs_acl xattr OK"
+
+status=0
+exit

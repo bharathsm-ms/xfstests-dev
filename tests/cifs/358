@@ -1,0 +1,63 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-2.0
+# CIFS: mandatory lock push on reconnect — hold locks, reconnect, verify
+# Exercises: cifs_push_mandatory_locks (file.c)
+
+. ./common/preamble
+. ./common/rc
+_begin_fstest auto stress
+
+[ "$FSTYP" = "cifs" ] || _notrun "requires CIFS"
+[ "$(id -u)" = 0 ] || _notrun "root required"
+[ -n "$TEST_DIR" ] || _notrun "TEST_DIR not set"
+
+. ./common/cifs_test
+_cifs_test_init
+command -v ss >/dev/null || _notrun "ss required"
+command -v python3 >/dev/null || _notrun "python3 required"
+_cifs_test_socket_snapshot > "$tmp.before"
+_cifs_test_mount 'vers=3.1.1,cache=none,echo_interval=1'
+_cifs_test_socket_snapshot > "$tmp.after"
+_cifs_test_new_socket "$tmp.before" "$tmp.after"
+_cifs_test_workspace "$CIFS_TEST_MNT"
+work=$CIFS_TEST_WORK
+_cifs_test_mount 'vers=3.1.1,cache=none'
+observer="$CIFS_TEST_MNT/${work##*/}/data"
+dd if=/dev/zero of="$work/data" bs=4096 count=10 status=none || _fail "create lock fixture"
+timeout --kill-after=5s 60 python3 - "$work/data" "$observer" "$CIFS_TEST_SOCKET" >> "$seqres.full" 2>&1 <<'PY'
+import errno, fcntl, os, subprocess, sys
+contender = '''
+import errno, fcntl, os, sys
+descriptor = os.open(sys.argv[1], os.O_RDWR)
+busy = sys.argv[2] == 'busy'
+try:
+	for index in range(5):
+		try:
+			fcntl.lockf(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB, 2048, index * 4096)
+		except OSError as error:
+			assert busy and error.errno in (errno.EACCES, errno.EAGAIN), error
+		else:
+			assert not busy, 'server lost a held lock'
+finally:
+	os.close(descriptor)
+'''
+descriptor = os.open(sys.argv[1], os.O_RDWR)
+try:
+	for index in range(5):
+		fcntl.lockf(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB, 2048, index * 4096)
+	subprocess.run([sys.executable, '-c', contender, sys.argv[2], 'busy'], check=True, timeout=10)
+	subprocess.run(['bash', '-c', '. ./common/cifs_test; CIFS_TEST_SOCKET=$1; _cifs_test_disconnect',
+					'disconnect', sys.argv[3]], check=True, timeout=15)
+	assert os.pwrite(descriptor, b'recovered', 0) == 9
+	os.fsync(descriptor)
+	assert os.pread(descriptor, 9, 0) == b'recovered'
+	subprocess.run([sys.executable, '-c', contender, sys.argv[2], 'busy'], check=True, timeout=10)
+	fcntl.lockf(descriptor, fcntl.LOCK_UN)
+	subprocess.run([sys.executable, '-c', contender, sys.argv[2], 'free'], check=True, timeout=10)
+finally:
+	os.close(descriptor)
+PY
+[ "$?" -eq 0 ] || _fail "held locks did not survive verified TCP reconnect"
+echo "mandatory lock push on reconnect OK"
+status=0
+exit

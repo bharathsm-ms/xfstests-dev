@@ -1,0 +1,61 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-2.0
+# CIFS: Case-insensitive directory operations
+#
+# Kernel code exercised
+#   dir.c    (cifs_ci_hash, cifs_ci_compare, cifs_create)
+#   readdir.c (cifs_readdir)
+#   inode.c  (cifs_lookup, cifs_mkdir)
+
+. ./common/preamble
+. ./common/rc
+
+_begin_fstest auto quick
+
+[ "$FSTYP" = "cifs" ] || _notrun "requires CIFS"
+[ "$(id -u)" = 0 ] || _notrun "root required"
+[ -n "$TEST_DEV" ] || _notrun "TEST_DEV not set"
+[ -n "$CIFS_CRED_FILE" ] || _notrun "CIFS_CRED_FILE not set"
+
+. ./common/cifs_test
+_cifs_test_init
+command -v python3 >/dev/null || _notrun "python3 required"
+_cifs_test_mount 'vers=3.1.1,nocase'
+_cifs_test_workspace "$CIFS_TEST_MNT"
+python3 - "$CIFS_TEST_WORK" >> "$seqres.full" 2>&1 <<'PY'
+import errno, os, sys
+from pathlib import Path
+root = Path(sys.argv[1])
+payloads = {'TestFile.txt': b'ci_data', 'Apple': b'a', 'Banana': b'b', 'Cherry': b'c'}
+for name, expected in payloads.items():
+    assert (root / name).write_bytes(expected) == len(expected)
+    for variant in (name.lower(), name.upper(), name.swapcase()):
+        assert (root / variant).read_bytes() == expected
+        assert (root / variant).stat().st_size == len(expected)
+(root / 'TestDir').mkdir()
+assert (root / 'TestDir/inner.txt').write_bytes(b'dirfile') == 7
+assert (root / 'testdir/INNER.TXT').read_bytes() == b'dirfile'
+assert os.listdir(root / 'TESTDIR') == ['inner.txt']
+try:
+    descriptor = os.open(root / 'testfile.txt', os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+except OSError as error:
+    assert error.errno == errno.EEXIST
+else:
+    os.close(descriptor)
+    raise AssertionError('case-insensitive exclusive create accepted duplicate')
+assert set(os.listdir(root)) == set(payloads) | {'TestDir'}
+os.rename(root / 'Apple', root / 'APPLE')
+names = os.listdir(root)
+assert len(names) == 5 and set(names) - {'Apple', 'APPLE'} == (set(payloads) - {'Apple'}) | {'TestDir'}
+assert sum(name in {'Apple', 'APPLE'} for name in names) == 1
+assert (root / 'apple').read_bytes() == b'a'
+os.rename(root / 'apple', root / 'rename_intermediate')
+os.rename(root / 'rename_intermediate', root / 'APPLE')
+assert set(os.listdir(root)) == (set(payloads) - {'Apple'}) | {'APPLE', 'TestDir'}
+assert (root / 'apple').read_bytes() == b'a'
+PY
+[ "$?" -eq 0 ] || _fail "case-insensitive directory contract failed"
+
+echo "Silence is golden"
+status=0
+exit

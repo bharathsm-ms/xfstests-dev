@@ -1,0 +1,74 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-2.0
+# CIFS: Oversized names — PATH_MAX, NAME_MAX, UTF-16 edge cases
+# Exercises: smb2pdu.c path validation, cifs_unicode.c edge cases
+
+. ./common/preamble
+. ./common/rc
+_begin_fstest auto quick
+
+[ "$FSTYP" = "cifs" ] || _notrun "requires CIFS"
+[ "$(id -u)" = 0 ] || _notrun "root required"
+[ -n "$TEST_DIR" ] || _notrun "TEST_DIR not set"
+. ./common/cifs_test
+_cifs_test_init
+command -v python3 >/dev/null || _notrun "python3 required"
+_cifs_test_workspace
+
+dmesg_before=$(dmesg | wc -l)
+
+python3 - "$CIFS_TEST_WORK" >> "$seqres.full" 2>&1 <<'PY'
+import errno, os, pathlib, sys
+root = pathlib.Path(sys.argv[1])
+maximum = os.pathconf(root, 'PC_NAME_MAX')
+assert 0 < maximum <= 255, 'unexpected CIFS component limit'
+long_name = root / ('x' * maximum)
+long_name.write_bytes(b'boundary')
+assert long_name.read_bytes() == b'boundary'
+long_name.unlink()
+try:
+	(root / ('y' * (maximum + 1))).write_bytes(b'invalid')
+except OSError as error:
+	assert error.errno == errno.ENAMETOOLONG, error
+else:
+	raise RuntimeError('overlong component accepted')
+
+deep = root
+for depth in range(30):
+	deep = deep / f'level_{depth:03d}'
+	deep.mkdir()
+(deep / 'data').write_bytes(b'deep')
+assert (deep / 'data').read_bytes() == b'deep'
+oversized = str(root) + '/part' * os.pathconf(root, 'PC_PATH_MAX')
+try:
+	os.stat(oversized)
+except OSError as error:
+	assert error.errno == errno.ENAMETOOLONG, error
+else:
+	raise RuntimeError('overlong pathname accepted')
+
+for name in ('file with spaces', "file'quote", 'file;semi', 'file&amp', 'unicode_\u03bb'):
+	target = root / name
+	target.write_bytes(name.encode())
+	assert target.read_bytes() == name.encode()
+	assert name in os.listdir(root), 'filename did not round trip'
+	target.unlink()
+try:
+	os.open(str(root / 'file') + '\x00null', os.O_CREAT | os.O_WRONLY, 0o600)
+except ValueError:
+	pass
+else:
+	raise RuntimeError('embedded NUL accepted')
+PY
+[ "$?" -eq 0 ] || _fail "filename boundary validation failed"
+
+# No crash
+dmesg_after=$(dmesg | wc -l)
+if [ $((dmesg_after - dmesg_before)) -gt 0 ]; then
+	dmesg | tail -n $((dmesg_after - dmesg_before)) | grep -qiE 'BUG:|panic|Oops:' && \
+		_fail "crash on oversized names"
+fi
+
+echo "oversized name error paths OK"
+status=0
+exit

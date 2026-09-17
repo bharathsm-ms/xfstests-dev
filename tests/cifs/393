@@ -1,0 +1,113 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-2.0
+# CIFS: Encryption and security negotiation deep
+#
+# Kernel code exercised
+#   smb2pdu.c       (decode_compress_ctx, decode_signing_ctx)
+#   smb2transport.c (smb2_calc_signature, smb2_get_sign_key)
+#   smb2ops.c       (smb2_set_oplock_level, smb2_downgrade_oplock,
+#                    smb2_is_read_op, smb2_dump_detail)
+#   sess.c          (cifs_select_sectype)
+
+. ./common/preamble
+. ./common/rc
+
+_begin_fstest auto quick
+
+[ "$FSTYP" = "cifs" ] || _notrun "requires CIFS"
+[ "$(id -u)" = 0 ] || _notrun "root required"
+[ -n "$TEST_DEV" ] || _notrun "TEST_DEV not set"
+[ -n "$CIFS_CRED_FILE" ] || _notrun "CIFS_CRED_FILE not set"
+
+. ./common/cifs_test
+_cifs_test_init
+command -v python3 >/dev/null || _notrun "python3 required"
+dd if=/dev/urandom of="$tmp.expected" bs=1M count=2 status=none || _fail "prepare expected data"
+
+dmesg_before=$(dmesg | wc -l)
+
+# Test 1: SMB3 encryption with the negotiated cipher
+echo "=== sec=ntlmsspi with seal ===" >> "$seqres.full"
+_cifs_test_mount 'vers=3.1.1,seal'
+_cifs_test_mount_option seal
+MNT=$CIFS_TEST_MNT
+rc=$?
+echo "seal mount rc=$rc" >> "$seqres.full"
+
+if [ $rc -eq 0 ]; then
+        _cifs_test_workspace "$MNT"
+        TDIR=$CIFS_TEST_WORK
+
+        # Various I/O patterns with encryption
+        echo "small_write" > "$TDIR/small" || _fail "encrypted small write failed"
+        dd if="$tmp.expected" of="$TDIR/medium" bs=64K conv=fsync 2>>"$seqres.full" || _fail "encrypted medium write failed"
+        dd if="$tmp.expected" of="$TDIR/large" bs=1M conv=fsync 2>>"$seqres.full" || _fail "encrypted large write failed"
+
+        # Read back all
+        [ "$(cat "$TDIR/small")" = small_write ] || _fail "encrypted small data mismatch"
+        cmp "$tmp.expected" "$TDIR/medium" || _fail "encrypted medium data mismatch"
+        cmp "$tmp.expected" "$TDIR/large" || _fail "encrypted large data mismatch"
+
+        # Metadata ops under encryption
+        stat "$TDIR/small" >> "$seqres.full" 2>&1 || _fail "encrypted stat failed"
+        ls -la "$TDIR/" >> "$seqres.full" 2>&1 || _fail "encrypted enumeration failed"
+        mv "$TDIR/small" "$TDIR/small_renamed" || _fail "encrypted rename failed"
+        ln "$TDIR/medium" "$TDIR/medium_link" || _fail "encrypted hardlink failed"
+        [ "$(cat "$TDIR/small_renamed")" = small_write ] || _fail "encrypted rename data mismatch"
+        cmp "$tmp.expected" "$TDIR/medium_link" || _fail "encrypted hardlink data mismatch"
+fi
+
+# Test 2: Different security types
+for sectype in ntlmsspi ntlmssp; do
+        echo "=== sec=$sectype ===" >> "$seqres.full"
+        _cifs_test_mount "vers=3.1.1,sec=$sectype"
+        _cifs_test_mount_option "sec=$sectype"
+        _cifs_test_workspace "$CIFS_TEST_MNT"
+        MNT=$CIFS_TEST_WORK
+        sec_rc=$?
+        echo "sec=$sectype mount rc=$sec_rc" >> "$seqres.full"
+        if [ $sec_rc -eq 0 ]; then
+                echo "test_$sectype" > "$MNT/sectest_$$" || _fail "security-mode write failed"
+                [ "$(cat "$MNT/sectest_$$")" = "test_$sectype" ] || _fail "security-mode data mismatch"
+        fi
+done
+
+# Test 3: Seal + sign combined
+echo "=== seal + sign ===" >> "$seqres.full"
+_cifs_test_mount 'vers=3.1.1,seal,sec=ntlmsspi'
+_cifs_test_mount_option seal
+_cifs_test_mount_option sec=ntlmsspi
+_cifs_test_workspace "$CIFS_TEST_MNT"
+MNT=$CIFS_TEST_WORK
+rc=$?
+echo "seal+sign mount rc=$rc" >> "$seqres.full"
+if [ $rc -eq 0 ]; then
+        echo "seal_sign_test" > "$MNT/sealsign_$$" || _fail "seal/sign write failed"
+        [ "$(cat "$MNT/sealsign_$$")" = seal_sign_test ] || _fail "seal/sign data mismatch"
+fi
+
+# Test 4: vers=3.0 (different negotiate context — no compression/signing ctx)
+echo "=== vers=3.0 ===" >> "$seqres.full"
+_cifs_test_mount 'vers=3.0,seal'
+_cifs_test_mount_option seal
+_cifs_test_workspace "$CIFS_TEST_MNT"
+MNT=$CIFS_TEST_WORK
+rc=$?
+echo "vers=3.0 mount rc=$rc" >> "$seqres.full"
+if [ $rc -eq 0 ]; then
+        echo "v30_test" > "$MNT/v30_$$" || _fail "SMB 3.0 encrypted write failed"
+        [ "$(cat "$MNT/v30_$$")" = v30_test ] || _fail "SMB 3.0 encrypted data mismatch"
+        _cifs_test_ioctl_info "$MNT/v30_$$" 0x300 >> "$seqres.full" 2>&1 || _fail "SMB 3.0 dialect mismatch"
+fi
+
+dmesg_after=$(dmesg | wc -l)
+if [ $((dmesg_after - dmesg_before)) -gt 0 ]; then
+        dmesg | tail -n $((dmesg_after - dmesg_before)) >> "$seqres.full"
+        dmesg | tail -n $((dmesg_after - dmesg_before)) | \
+                grep -qiE 'BUG:|panic|Oops:' && \
+                _fail "kernel crash during encryption/security tests"
+fi
+
+echo "Silence is golden"
+status=0
+exit

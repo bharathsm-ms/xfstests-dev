@@ -1,0 +1,37 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-2.0
+# CIFS: case-insensitive lookup — nocase mount, cifs_ci_hash/compare
+# Exercises: dir.c (cifs_ci_hash, cifs_ci_compare, cifs_create)
+
+. ./common/preamble
+. ./common/rc
+_begin_fstest auto quick
+
+[ "$FSTYP" = "cifs" ] || _notrun "requires CIFS"
+[ "$(id -u)" = 0 ] || _notrun "root required"
+[ -n "$TEST_DEV" ] || _notrun "TEST_DEV not set"
+[ -n "$CIFS_CRED_FILE" ] || _notrun "CIFS_CRED_FILE not set"
+
+. ./common/cifs_test
+_cifs_test_init
+_cifs_test_mount 'vers=3.1.1,nocase'
+_cifs_test_workspace "$CIFS_TEST_MNT"
+MNT=$CIFS_TEST_WORK
+
+F="$MNT/CiFs374_CaSe_TeSt.$$"
+echo "case-test" > "$F" 2>>"$seqres.full" || _fail "create"
+
+# With nocase, these should all access the same file
+for name in "cifs374_case_test.$$" "CIFS374_CASE_TEST.$$" "CiFs374_CaSe_TeSt.$$"; do
+	data=$(cat "$MNT/$name" 2>>"$seqres.full") || _fail "case-variant lookup failed"
+	[ "$data" = case-test ] || _fail "case-variant data mismatch"
+	echo "access '$name': data='$data'" >> "$seqres.full"
+done
+
+# Stat with different cases
+stat "$MNT/cifs374_case_test.$$" >> "$seqres.full" 2>&1 || _fail "case-variant stat failed"
+
+unlink "$F" 2>/dev/null || true
+echo "nocase lookup OK"
+status=0
+exit

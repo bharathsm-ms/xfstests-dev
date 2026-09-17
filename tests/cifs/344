@@ -1,0 +1,56 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-2.0
+#
+# CIFS: O_DIRECT strict read/write — forcedirectio and per-open DIO
+#
+# Behavior under test
+# - Write a file with O_DIRECT, read it back with O_DIRECT
+# - Verify data integrity
+# - Write with buffered, read with O_DIRECT (cache bypass)
+# - Mount with cache=none and verify data written through that mount
+#
+# Kernel code exercised
+#   file.c (cifs_strict_readv, cifs_strict_writev, cifs_direct_io)
+
+. ./common/preamble
+. ./common/rc
+
+_begin_fstest auto quick
+
+[ "$FSTYP" = "cifs" ] || _notrun "requires CIFS"
+[ "$(id -u)" = 0 ] || _notrun "root required"
+[ -n "$TEST_DIR" ] || _notrun "TEST_DIR not set"
+
+. ./common/cifs_test
+_cifs_test_init
+_cifs_test_workspace
+TESTFILE="$CIFS_TEST_WORK/data"
+dd if=/dev/urandom of="$tmp.expected" bs=1M count=4 status=none || _fail "prepare expected data"
+
+# ── Test 1: O_DIRECT write + read ─────────────────────────────
+echo "test1: O_DIRECT write+read" >> "$seqres.full"
+
+dd if="$tmp.expected" of="$TESTFILE" bs=4096 oflag=direct conv=fsync 2>>"$seqres.full" || _fail "O_DIRECT write failed"
+dd if="$TESTFILE" of="$tmp.read" bs=4096 iflag=direct 2>>"$seqres.full" || _fail "O_DIRECT read failed"
+cmp "$tmp.expected" "$tmp.read" || _fail "O_DIRECT data mismatch"
+
+# ── Test 2: buffered write, DIO read (cache bypass) ───────────
+echo "test2: buffered write, DIO read" >> "$seqres.full"
+cp "$tmp.expected" "${TESTFILE}.buf" || _fail "buffered write failed"
+dd if="${TESTFILE}.buf" of="$tmp.read" bs=4096 iflag=direct 2>>"$seqres.full" || _fail "buffered-to-direct read failed"
+cmp "$tmp.expected" "$tmp.read" || _fail "buffered-to-direct data mismatch"
+
+# ── Test 3: large DIO ─────────────────────────────────────────
+echo "test3: large DIO" >> "$seqres.full"
+dd if="$tmp.expected" of="${TESTFILE}.large" bs=1M oflag=direct conv=fsync 2>>"$seqres.full" || _fail "large DIO write failed"
+dd if="${TESTFILE}.large" of="$tmp.read" bs=1M iflag=direct 2>>"$seqres.full" || _fail "large DIO read failed"
+cmp "$tmp.expected" "$tmp.read" || _fail "large DIO data mismatch"
+_cifs_test_mount 'vers=3.1.1,cache=none'
+_cifs_test_workspace "$CIFS_TEST_MNT"
+cp "$tmp.expected" "$CIFS_TEST_WORK/data" || _fail "cache=none write failed"
+cmp "$tmp.expected" "$CIFS_TEST_WORK/data" || _fail "cache=none data mismatch"
+
+echo "O_DIRECT strict read/write OK"
+
+status=0
+exit

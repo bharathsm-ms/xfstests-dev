@@ -1,0 +1,101 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-2.0
+# CIFS: File/directory metadata, MF symlinks and hardlink lifecycle
+#
+# Kernel code exercised
+#   smb2inode.c (smb2_query_reparse_point, smb2_mkdir_setinfo,
+#                smb2_create_reparse_inode, check_wsl_eas,
+#                clear_tmpfile_attr, reparse_buf_ptr)
+
+. ./common/preamble
+. ./common/rc
+
+_begin_fstest auto quick
+
+[ "$FSTYP" = "cifs" ] || _notrun "requires CIFS"
+[ "$(id -u)" = 0 ] || _notrun "root required"
+[ -n "$TEST_DEV" ] || _notrun "TEST_DEV not set"
+[ -n "$CIFS_CRED_FILE" ] || _notrun "CIFS_CRED_FILE not set"
+
+. ./common/cifs_test
+_cifs_test_init
+command -v python3 >/dev/null || _notrun "python3 required"
+_cifs_test_mount 'vers=3.1.1,mfsymlinks,cifsacl,actimeo=0'
+_cifs_test_workspace "$CIFS_TEST_MNT"
+MNT=$CIFS_TEST_WORK
+
+TDIR="$MNT/inode_test_$$"
+mkdir "$TDIR" || _fail "create owned directory"
+dmesg_before=$(dmesg | wc -l)
+
+# Test 1: mkdir with setinfo — creates directory and sets attributes
+mkdir "$TDIR/dir1" 2>>"$seqres.full" || _fail "mkdir failed"
+stat "$TDIR/dir1" >> "$seqres.full" 2>&1 || _fail "directory stat failed"
+echo "mkdir rc=$?" >> "$seqres.full"
+
+# Nested directories trigger multiple compounds
+mkdir -p "$TDIR/dir1/dir2/dir3" 2>>"$seqres.full" || _fail "nested mkdir failed"
+[ -d "$TDIR/dir1/dir2/dir3" ] || _fail "nested directory missing"
+
+# Test 2: Create symlink then query reparse point
+echo "reparse_target" > "$TDIR/rp_target" || _fail "create target failed"
+ln -s "rp_target" "$TDIR/rp_link" 2>>"$seqres.full" || _fail "MF symlink failed"
+echo "symlink create rc=$?" >> "$seqres.full"
+
+# stat on symlink triggers reparse query
+[ -L "$TDIR/rp_link" ] || _fail "symlink type mismatch"
+[ "$(cat "$TDIR/rp_link")" = reparse_target ] || _fail "symlink data mismatch"
+
+# readlink exercises query_reparse_point
+[ "$(readlink "$TDIR/rp_link")" = rp_target ] || _fail "symlink target mismatch"
+echo "readlink rc=$?" >> "$seqres.full"
+
+# Test 3: Compound create+setinfo for file attributes
+echo hardlink-data > "$TDIR/tmpfile" || _fail "create rename fixture"
+# Immediate stat triggers compound queries
+stat "$TDIR/tmpfile" >> "$seqres.full" 2>&1 || _fail "file stat failed"
+
+# Test 4: Rename operation (compound rename)
+mv "$TDIR/tmpfile" "$TDIR/renamed_file" 2>>"$seqres.full" || _fail "rename failed"
+[ ! -e "$TDIR/tmpfile" ] || _fail "old name survived rename"
+echo "rename rc=$?" >> "$seqres.full"
+stat "$TDIR/renamed_file" >> "$seqres.full" 2>&1 || _fail "renamed file missing"
+
+# Test 5: Hardlink (compound setinfo for link)
+ln "$TDIR/renamed_file" "$TDIR/hardlink_file" 2>>"$seqres.full" || _fail "hardlink failed"
+[ "$(cat "$TDIR/hardlink_file")" = hardlink-data ] || _fail "hardlink data mismatch"
+[ "$(stat -c %h "$TDIR/renamed_file")" -eq 2 ] || _fail "hardlink count mismatch"
+echo "hardlink rc=$?" >> "$seqres.full"
+stat "$TDIR/hardlink_file" >> "$seqres.full" 2>&1
+
+# Test 6: Unlink (compound delete)
+rm "$TDIR/hardlink_file" 2>>"$seqres.full" || _fail "hardlink removal failed"
+[ "$(cat "$TDIR/renamed_file")" = hardlink-data ] || _fail "hardlink removal changed target"
+echo "unlink rc=$?" >> "$seqres.full"
+
+# Test 7: Set times via touch (setinfo basic info)
+touch -d @1577880000 "$TDIR/renamed_file" 2>>"$seqres.full" || _fail "set timestamp failed"
+[ "$(stat -c %Y "$TDIR/renamed_file")" -eq 1577880000 ] || _fail "mtime mismatch"
+echo "touch rc=$?" >> "$seqres.full"
+stat "$TDIR/renamed_file" >> "$seqres.full" 2>&1
+
+# Test 8: chmod (setinfo DACL)
+chmod 755 "$TDIR/renamed_file" 2>>"$seqres.full" || _fail "file chmod failed"
+[ "$(stat -c %a "$TDIR/renamed_file")" = 755 ] || _fail "file mode mismatch"
+echo "chmod rc=$?" >> "$seqres.full"
+stat "$TDIR/renamed_file" >> "$seqres.full" 2>&1
+
+# Cleanup
+rm -rf "$TDIR"
+
+dmesg_after=$(dmesg | wc -l)
+if [ $((dmesg_after - dmesg_before)) -gt 0 ]; then
+        dmesg | tail -n $((dmesg_after - dmesg_before)) >> "$seqres.full"
+        dmesg | tail -n $((dmesg_after - dmesg_before)) | \
+                grep -qiE 'BUG:|panic|Oops:' && \
+                _fail "kernel crash during smb2inode tests"
+fi
+
+echo "Silence is golden"
+status=0
+exit

@@ -1,0 +1,34 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-2.0
+# CIFS: cache=none sync read/write — exercise smb2_sync_read, smb2_sync_write
+# Exercises: smb2_sync_read, smb2_sync_write (smb2ops.c)
+
+. ./common/preamble
+. ./common/rc
+_begin_fstest auto quick
+. ./common/cifs_test
+_cifs_test_init
+
+[ "$FSTYP" = "cifs" ] || _notrun "requires CIFS"
+[ "$(id -u)" = 0 ] || _notrun "root required"
+[ -n "$TEST_DEV" ] || _notrun "TEST_DEV not set"
+[ -n "$CIFS_CRED_FILE" ] || _notrun "CIFS_CRED_FILE not set"
+
+_cifs_test_mount 'vers=3.1.1,cache=none'
+MNT=$CIFS_TEST_MNT
+_cifs_test_workspace "$MNT"
+F="$CIFS_TEST_WORK/data"
+dd if=/dev/urandom of="$tmp.expected" bs=4096 count=64 status=none || _fail "prepare payload"
+dd if="$tmp.expected" of="$F" bs=4096 conv=fsync status=none || _fail "write failed"
+cmp "$tmp.expected" "$F" || _fail "data mismatch"
+
+# Small writes + reads to exercise sync path
+for sz in 1 13 512 4095 4096 8192; do
+	dd if=/dev/urandom of="$tmp.expected" bs=$sz count=1 status=none || _fail "prepare small payload"
+	dd if="$tmp.expected" of="$F" bs=$sz conv=fsync status=none || _fail "small write failed"
+	cmp "$tmp.expected" "$F" || _fail "small read mismatch"
+done
+
+echo "cache=none sync I/O OK"
+status=0
+exit

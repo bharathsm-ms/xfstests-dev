@@ -1,0 +1,75 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-2.0
+# CIFS: explicit close + serverclose_work — open, close, re-open rapidly
+# Exercises: smb2_close_file (smb2ops.c), serverclose_work (file.c)
+
+. ./common/preamble
+. ./common/rc
+_begin_fstest auto quick
+
+[ "$FSTYP" = "cifs" ] || _notrun "requires CIFS"
+[ "$(id -u)" = 0 ] || _notrun "root required"
+[ -n "$TEST_DIR" ] || _notrun "TEST_DIR not set"
+. ./common/cifs_test
+. ./common/cifs_debug
+_cifs_test_init
+command -v python3 >/dev/null || _notrun "python3 required"
+[ -r /proc/fs/cifs/open_files ] || _notrun "CIFS open_files required"
+_cifs_test_mount 'vers=3.1.1,cache=strict,closetimeo=1'
+_cifs_test_workspace "$CIFS_TEST_MNT"
+prefix=${CIFS_TEST_WORK##*/}
+F="$CIFS_TEST_WORK/$prefix.data"
+closes_before=$(_cifs_stat "$TEST_DEV" Closes:) || _notrun "per-share Closes counter unavailable"
+
+# Rapid open-write-close cycles to exercise close path
+for iteration in $(seq 1 100); do
+    echo "data$iteration" > "$F" || _fail "open-write-close cycle failed"
+done
+[ "$(cat "$F")" = data100 ] || _fail "cycle data mismatch"
+echo "100 open-write-close cycles done" >> "$seqres.full"
+
+# Open, write, fsync, close — explicit flush before close
+python3 - "$F" >> "$seqres.full" 2>&1 <<'PY'
+import os, sys
+for iteration in range(50):
+    descriptor = os.open(sys.argv[1], os.O_CREAT | os.O_RDWR | os.O_TRUNC, 0o600)
+    try:
+        expected = bytes([iteration]) * 4096
+        assert os.write(descriptor, expected) == len(expected)
+        os.fsync(descriptor)
+        assert os.pread(descriptor, len(expected) + 1, 0) == expected
+    finally:
+        os.close(descriptor)
+print('50 open-fsync-close cycles done')
+PY
+[ "$?" -eq 0 ] || _fail "open-fsync-close cycle failed"
+
+# Concurrent open+close from multiple subshells
+for worker in 1 2 3 4; do
+    (
+        for iteration in $(seq 1 25); do
+            expected="p$worker-$iteration"
+            echo "$expected" > "$F.$worker" || exit 1
+            [ "$(cat "$F.$worker")" = "$expected" ] || exit 1
+        done
+    ) &
+    _cifs_test_children+=("$!")
+done
+_cifs_test_wait
+python3 - "$prefix" >> "$seqres.full" 2>&1 <<'PY'
+import sys, time
+deadline = time.monotonic() + 10
+while True:
+    with open('/proc/fs/cifs/open_files') as source:
+        remaining = [line for line in source if sys.argv[1] in line]
+    if not remaining:
+        break
+    assert time.monotonic() < deadline, 'owned server handles did not drain'
+    time.sleep(0.1)
+PY
+[ "$?" -eq 0 ] || _fail "deferred close did not drain"
+closes_after=$(_cifs_stat "$TEST_DEV" Closes:) || _fail "read final Closes counter"
+[ "$closes_after" -gt "$closes_before" ] || _fail "no server CLOSE observed"
+echo "explicit close coverage OK"
+status=0
+exit

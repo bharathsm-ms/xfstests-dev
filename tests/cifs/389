@@ -1,0 +1,107 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-2.0
+# CIFS: Transport and misc deep — credits, encryption, signing
+#
+# Kernel code exercised
+#   transport.c    (cifs_wait_mtu_credits, cifs_readv_discard)
+#   smb2transport.c (smb2_calc_signature, smb2_get_sign_key)
+#   cifsencrypt.c   (build_avpair_blob)
+#   misc.c          (copy_path_name, match_target_ip,
+#                    cifs_update_super_prepath)
+
+. ./common/preamble
+. ./common/rc
+
+_begin_fstest auto quick
+
+[ "$FSTYP" = "cifs" ] || _notrun "requires CIFS"
+[ "$(id -u)" = 0 ] || _notrun "root required"
+[ -n "$TEST_DEV" ] || _notrun "TEST_DEV not set"
+[ -n "$CIFS_CRED_FILE" ] || _notrun "CIFS_CRED_FILE not set"
+
+. ./common/cifs_test
+_cifs_test_init
+dd if=/dev/urandom of="$tmp.expected" bs=1M count=4 status=none || _fail "prepare transport data"
+
+dmesg_before=$(dmesg | wc -l)
+
+# Test 1: Mount with signing required — exercises smb2_calc_signature
+_cifs_test_mount 'vers=3.1.1,sec=ntlmsspi,cache=none'
+_cifs_test_mount_option sec=ntlmsspi
+rc=$?
+echo "signed mount rc=$rc" >> "$seqres.full"
+if [ $rc -ne 0 ]; then
+        _notrun "signed mount failed"
+fi
+
+_cifs_test_workspace "$CIFS_TEST_MNT"
+TDIR=$CIFS_TEST_WORK
+
+# Signed I/O exercises smb2_calc_signature on every packet
+for i in $(seq 1 10); do
+        dd if="$tmp.expected" of="$TDIR/signed_$i" bs=4096 count=1 conv=fsync 2>>"$seqres.full" || _fail "signed write failed"
+        cmp -n 4096 "$tmp.expected" "$TDIR/signed_$i" || _fail "signed data mismatch"
+done
+echo "signed I/O OK" >> "$seqres.full"
+
+# Test 2: Large sequential I/O — exercises credit management
+dd if="$tmp.expected" of="$TDIR/large_file" bs=1M conv=fsync 2>>"$seqres.full" || _fail "large signed write failed"
+echo "large write rc=$?" >> "$seqres.full"
+cmp "$tmp.expected" "$TDIR/large_file" || _fail "large signed read mismatch"
+echo "large read rc=$?" >> "$seqres.full"
+
+# Test 3: Concurrent small writes — exercises credit waiting
+for i in $(seq 1 20); do
+        echo "concurrent_$i" > "$TDIR/conc_$i" &
+        _cifs_test_children+=("$!")
+done
+_cifs_test_wait
+echo "concurrent writes done" >> "$seqres.full"
+
+# Read all back
+for i in $(seq 1 20); do
+        [ "$(cat "$TDIR/conc_$i")" = "concurrent_$i" ] || _fail "concurrent signed data mismatch"
+done
+
+
+# Test 4: Mount with seal (encryption) — exercises encryption path
+_cifs_test_mount 'vers=3.1.1,seal,cache=none'
+_cifs_test_mount_option seal
+rc=$?
+echo "encrypted mount rc=$rc" >> "$seqres.full"
+
+if [ $rc -eq 0 ]; then
+        _cifs_test_workspace "$CIFS_TEST_MNT"
+        TDIR=$CIFS_TEST_WORK
+
+        # Encrypted I/O
+        for i in $(seq 1 5); do
+                dd if="$tmp.expected" of="$TDIR/enc_$i" bs=8192 count=1 conv=fsync 2>>"$seqres.full" || _fail "encrypted write failed"
+                cmp -n 8192 "$tmp.expected" "$TDIR/enc_$i" || _fail "encrypted read mismatch"
+        done
+        echo "encrypted I/O OK" >> "$seqres.full"
+
+fi
+
+# Test 5: Mount with subpath (prepath) — exercises cifs_update_super_prepath
+# and copy_path_name
+_cifs_test_mount 'vers=3.1.1,cache=none'
+_cifs_test_workspace "$CIFS_TEST_MNT"
+prepath=$CIFS_TEST_WORK
+echo prepath_test > "$prepath/testfile" || _fail "prepare prepath fixture"
+_cifs_test_mount 'vers=3.1.1,cache=none' "${TEST_DEV}/${prepath##*/}"
+[ "$(cat "$CIFS_TEST_MNT/testfile")" = prepath_test ] || _fail "prepath data mismatch"
+echo updated_prepath > "$CIFS_TEST_MNT/testfile" || _fail "prepath write failed"
+[ "$(cat "$prepath/testfile")" = updated_prepath ] || _fail "prepath writes not visible through root mount"
+
+dmesg_after=$(dmesg | wc -l)
+if [ $((dmesg_after - dmesg_before)) -gt 0 ]; then
+        dmesg | tail -n $((dmesg_after - dmesg_before)) >> "$seqres.full"
+        dmesg | tail -n $((dmesg_after - dmesg_before)) | \
+                grep -qiE 'BUG:|panic|Oops:' && \
+                _fail "kernel crash during transport tests"
+fi
+
+echo "Silence is golden"
+status=0
+exit

@@ -1,0 +1,44 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-2.0
+# CIFS: encrypted read/write — seal mount with large I/O
+# Exercises: smb2_decrypt_offload, receive_encrypted_read paths (smb2ops.c)
+#            Also: smb3_handle_read_data with encryption
+
+. ./common/preamble
+. ./common/rc
+_begin_fstest auto quick
+. ./common/cifs_test
+_cifs_test_init
+
+[ "$FSTYP" = "cifs" ] || _notrun "requires CIFS"
+[ "$(id -u)" = 0 ] || _notrun "root required"
+[ -n "$TEST_DEV" ] || _notrun "TEST_DEV not set"
+[ -n "$CIFS_CRED_FILE" ] || _notrun "CIFS_CRED_FILE not set"
+
+_cifs_test_mount 'vers=3.1.1,seal,cache=none'
+MNT=$CIFS_TEST_MNT
+_cifs_test_workspace "$MNT"
+F="$CIFS_TEST_WORK/data"
+
+# Large encrypted write (exercises encrypt->send path)
+dd if=/dev/urandom of="$tmp.expected" bs=1M count=8 status=none || _fail "prepare payload"
+dd if="$tmp.expected" of="$F" bs=1M conv=fsync status=none || _fail "write"
+
+# Large encrypted read (exercises receive_encrypted_read)
+cmp "$tmp.expected" "$F" || _fail "encrypted data mismatch"
+
+# Concurrent encrypted I/O
+for i in 1 2 3; do
+	(
+		trap - EXIT HUP INT QUIT TERM
+		dd if="$tmp.expected" of="$F.$i" bs=256K conv=fsync status=none && cmp "$tmp.expected" "$F.$i"
+	) &
+	_cifs_test_children+=("$!")
+done
+_cifs_test_wait
+
+for i in 1 2 3; do unlink "$F.$i" 2>/dev/null || true; done
+unlink "$F" 2>/dev/null || true
+echo "encrypted read/write OK"
+status=0
+exit

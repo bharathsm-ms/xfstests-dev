@@ -1,0 +1,107 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-2.0
+# CIFS: SMB2 byte-range locks — lock/unlock, mandatory, oplock break
+#
+# Kernel code exercised
+#   smb2pdu.c  (SMB2_lock, smb2_lockv, SMB2_oplock_break)
+#   smb2ops.c  (smb2_mand_lock, smb2_set_oplock_level, smb2_downgrade_oplock)
+#   file.c     (cifs_lock_add, cifs_unlock_range, cifs_free_llist,
+#               cifs_move_llist, cifs_push_mandatory_locks)
+#   smb2misc.c (cifs_ses_oplock_break, smb2_tcon_find_pending_open_lease,
+#               smb2_queue_pending_open_break)
+
+. ./common/preamble
+. ./common/rc
+
+_begin_fstest auto quick
+
+[ "$FSTYP" = "cifs" ] || _notrun "requires CIFS"
+[ "$(id -u)" = 0 ] || _notrun "root required"
+[ -n "$TEST_DEV" ] || _notrun "TEST_DEV not set"
+[ -n "$CIFS_CRED_FILE" ] || _notrun "CIFS_CRED_FILE not set"
+
+. ./common/cifs_test
+_cifs_test_init
+command -v "${CC:-cc}" >/dev/null || _notrun "C compiler required"
+_cifs_test_mount 'vers=3.1.1,cache=none'
+_cifs_test_workspace "$CIFS_TEST_MNT"
+first="$CIFS_TEST_WORK/data"
+relative=${CIFS_TEST_WORK##*/}
+_cifs_test_mount 'vers=3.1.1,cache=none'
+second="$CIFS_TEST_MNT/$relative/data"
+dd if=/dev/zero of="$first" bs=4096 count=1 status=none || _fail "prepare lock fixture"
+cat > "$tmp.lock.c" <<'C'
+#include <assert.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <sys/wait.h>
+#include <unistd.h>
+
+static void probe(const char *path, short expected)
+{
+    int descriptor = open(path, O_RDWR);
+    assert(descriptor >= 0);
+    for (int index = 0; index < 5; index++) {
+        struct flock query = { .l_type = F_WRLCK, .l_whence = SEEK_SET,
+            .l_start = index * 100, .l_len = 50 };
+        assert(fcntl(descriptor, F_GETLK, &query) == 0);
+        assert(query.l_type == expected);
+        struct flock request = { .l_type = F_WRLCK, .l_whence = SEEK_SET,
+            .l_start = index * 100, .l_len = 50 };
+        int result = fcntl(descriptor, F_SETLK, &request);
+        if (expected == F_UNLCK) {
+            assert(result == 0);
+            request.l_type = F_UNLCK;
+            assert(fcntl(descriptor, F_SETLK, &request) == 0);
+        } else {
+            assert(result == -1 && (errno == EAGAIN || errno == EACCES));
+        }
+    }
+    assert(close(descriptor) == 0);
+}
+
+static void contender(const char *path, short expected)
+{
+    pid_t child = fork();
+    assert(child >= 0);
+    if (!child) {
+        probe(path, expected);
+        _exit(0);
+    }
+    int status;
+    assert(waitpid(child, &status, 0) == child);
+    assert(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+}
+
+int main(int argc, char **argv)
+{
+    assert(argc == 3);
+    int descriptor = open(argv[1], O_RDWR);
+    assert(descriptor >= 0);
+    short kinds[] = { F_RDLCK, F_WRLCK };
+    for (unsigned int phase = 0; phase < sizeof(kinds) / sizeof(kinds[0]); phase++) {
+        for (int index = 0; index < 5; index++) {
+            struct flock request = { .l_type = kinds[phase], .l_whence = SEEK_SET,
+                .l_start = index * 100, .l_len = 50 };
+            assert(fcntl(descriptor, F_SETLK, &request) == 0);
+        }
+        contender(argv[2], kinds[phase]);
+        struct flock unlock = { .l_type = F_UNLCK, .l_whence = SEEK_SET,
+            .l_start = 0, .l_len = 0 };
+        assert(fcntl(descriptor, F_SETLK, &unlock) == 0);
+        contender(argv[2], F_UNLCK);
+    }
+    assert(close(descriptor) == 0);
+    return 0;
+}
+C
+"${CC:-cc}" -D_FILE_OFFSET_BITS=64 -Wall -Wextra -Werror -O2 \
+	"$tmp.lock.c" -o "$tmp.lock" >> "$seqres.full" 2>&1 || _fail "compile native lock helper"
+timeout --kill-after=5s 45 "$tmp.lock" "$first" "$second" >> "$seqres.full" 2>&1 ||
+	_fail "cross-mount lock conflict/query/release failed"
+
+echo "Silence is golden"
+status=0
+exit
