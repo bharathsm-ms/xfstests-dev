@@ -40,15 +40,21 @@ _cifs_test_cleanup()
 _cifs_test_mount()
 {
 	local options="$1" device="${2:-$TEST_DEV}" result
+	local unsupported_reason="${3:-}"
 	command -v timeout >/dev/null || _notrun "timeout required"
 	[ -r "$CIFS_CRED_FILE" ] || _notrun "CIFS_CRED_FILE required"
 	CIFS_TEST_MNT=$(mktemp -d "/tmp/cifs$seq.XXXXXXXX") || _fail "mktemp mountpoint"
 	_cifs_test_dirs+=("$CIFS_TEST_MNT")
-	timeout --kill-after=5s 30 mount -t cifs "$device" "$CIFS_TEST_MNT" \
-		-o "credentials=$CIFS_CRED_FILE,nosharesock,$options" >> "$seqres.full" 2>&1
+	LC_ALL=C timeout --kill-after=5s 30 mount -t cifs "$device" "$CIFS_TEST_MNT" \
+		-o "credentials=$CIFS_CRED_FILE,nosharesock,$options" > "$tmp.mount" 2>&1
 	result=$?
+	cat "$tmp.mount" >> "$seqres.full"
 	if awk -v target="$CIFS_TEST_MNT" '$2 == target {found=1} END {exit !found}' /proc/self/mounts; then
 		_cifs_test_mounts+=("$CIFS_TEST_MNT")
+	elif [ -n "$unsupported_reason" ] && [ "$result" -ne 0 ] &&
+	     [ "$result" -ne 124 ] && [ "$result" -ne 137 ] &&
+	     grep -q '^mount error(95):' "$tmp.mount"; then
+		_notrun "$unsupported_reason"
 	else
 		_fail "requested filesystem was not attached"
 	fi

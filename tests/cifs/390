@@ -1,0 +1,74 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-2.0
+# CIFS: SMB3.1.1 POSIX extensions — exercise smb311 posix paths
+#
+# Samba 4.21.4 returned EIO from statvfs() in our test setup, while Samba
+# 4.22.11 passed. This is an observation, not a server-version gate:
+# failures after successful POSIX negotiation must remain failures.
+#
+# Kernel code exercised
+#   smb2pdu.c   (add_posix_context, create_posix_buf, parse_posix_ctxt,
+#                posix_info_parse, posix_info_extra_size, posix_info_sid_size,
+#                setup_owner_group_sids, smb311_posix_mkdir,
+#                SMB311_posix_qfs_info, copy_posix_fs_info_to_kstatfs)
+#   inode.c     (smb311_posix_get_fattr, smb311_posix_get_inode_info,
+#                smb311_posix_info_to_fattr, cifs_get_inode_info_unix,
+#                cifs_get_file_info_unix, cifs_get_unix_fattr)
+#   readdir.c   (cifs_fill_dirent_posix)
+#   smb2inode.c (parse_posix_sids)
+
+. ./common/preamble
+. ./common/rc
+
+_begin_fstest auto quick
+
+[ "$FSTYP" = "cifs" ] || _notrun "requires CIFS"
+[ "$(id -u)" = 0 ] || _notrun "root required"
+[ -n "$TEST_DEV" ] || _notrun "TEST_DEV not set"
+[ -n "$CIFS_CRED_FILE" ] || _notrun "CIFS_CRED_FILE not set"
+
+. ./common/cifs_test
+_cifs_test_init
+command -v python3 >/dev/null || _notrun "python3 required"
+_cifs_test_mount 'vers=3.1.1,actimeo=0'
+_cifs_test_mount 'vers=3.1.1,posix,actimeo=0' "$TEST_DEV" \
+    "server does not support SMB3 POSIX extensions"
+awk -v target="$CIFS_TEST_MNT" '$2 == target && $4 ~ /(^|,)posix(,|$)/ {found=1} END {exit !found}' /proc/self/mounts ||
+        _notrun "server did not negotiate SMB3 POSIX extensions"
+_cifs_test_workspace "$CIFS_TEST_MNT"
+python3 - "$CIFS_TEST_WORK" >> "$seqres.full" 2>&1 <<'PY'
+import os, stat, sys
+from pathlib import Path
+root = Path(sys.argv[1])
+os.umask(0)
+directory = root / 'private'
+directory.mkdir(mode=0o700)
+assert stat.S_IMODE(directory.stat().st_mode) == 0o700
+target = root / 'file'
+assert target.write_bytes(b'posix-data') == 10
+try:
+    for mode in (0o777, 0o755, 0o644, 0o600, 0o444, 0):
+        target.chmod(mode)
+        assert stat.S_IMODE(target.stat().st_mode) == mode
+finally:
+    target.chmod(0o644)
+os.symlink('file', root / 'link')
+assert os.readlink(root / 'link') == 'file'
+assert stat.S_ISLNK((root / 'link').lstat().st_mode)
+assert (root / 'link').read_bytes() == b'posix-data'
+expected = {'private', 'file', 'link'}
+for number in range(10):
+    name = f'entry-{number}'
+    payload = str(number).encode()
+    assert (root / name).write_bytes(payload) == len(payload)
+    assert (root / name).read_bytes() == payload
+    expected.add(name)
+assert set(os.listdir(root)) == expected
+info = os.statvfs(root)
+assert info.f_bsize > 0 and info.f_blocks > 0
+PY
+[ "$?" -eq 0 ] || _fail "negotiated POSIX metadata or data mismatch"
+
+echo "Silence is golden"
+status=0
+exit
