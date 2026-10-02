@@ -24,7 +24,11 @@ _begin_fstest auto quick
 . ./common/cifs_debug
 _cifs_test_init
 command -v python3 >/dev/null || _notrun "python3 required"
-_cifs_test_mount 'vers=3.1.1,cache=none'
+mount_options='vers=3.1.1,cache=none,nomultichannel'
+if [ "${CIFS_TEST_NETBIOS:-}" = yes ]; then
+    mount_options="$mount_options,port=139,nbsessinit,servern=CIFS422,netbiosname=CIFSCLIENT"
+fi
+_cifs_test_mount "$mount_options"
 _cifs_test_workspace "$CIFS_TEST_MNT"
 TDIR=$CIFS_TEST_WORK
 dd if=/dev/urandom of="$tmp.expected" bs=1M count=4 status=none || _fail "prepare expected data"

@@ -33,10 +33,54 @@ for opts in \
 	"closetimeo=notanumber" \
 	"echo_interval=notanumber" \
 	"snapshot=abc" \
-	"max_channels=notanumber"; do
+	"max_channels=notanumber" \
+	"blocksize=0" \
+	"blocksize=4294967295" \
+	"rasize=0" \
+	"rasize=4294967295" \
+	"acregmax=4294967295" \
+	"acdirmax=4294967295" \
+	"actimeo=4294967295" \
+	"closetimeo=4294967295" \
+	"echo_interval=0" \
+	"echo_interval=4294967295" \
+	"max_credits=19" \
+	"max_credits=60001" \
+	"max_channels=0" \
+	"max_channels=4294967295" \
+	"max_cached_dirs=0" \
+	"handletimeout=4294967295" \
+	"upcall_target=bogus" \
+	"reparse=bogus" \
+	"symlink=bogus" \
+	"symlinkroot=relative" \
+	"srcaddr=invalid-address" \
+	"iocharset=$(printf '%65s' '' | tr ' ' x)" \
+	"persistenthandles,nopersistenthandles" \
+	"nopersistenthandles,persistenthandles" \
+	"persistenthandles,resilienthandles" \
+	"resilienthandles,persistenthandles" \
+	"multiuser,upcall_target=mount" \
+	"multichannel,max_channels=1" \
+	"nomultichannel,max_channels=2"; do
 	echo "trying: $opts" >> "$seqres.full"
 	_cifs_test_mount_rejected "credentials=$CIFS_CRED_FILE,$opts" "$TEST_DEV" \
 		'bad|invalid|unknown|mount error\(22\)'
+	[ "$(cat "$CIFS_TEST_WORK/data")" = positive-control ] || _fail "negative mount changed control data"
+done
+
+for opts in noposixpaths sec=krb5 multiuser username=cifs-invalid-user \
+	domain=CIFS_INVALID_DOMAIN iocharset=ascii nounicode nbsessinit; do
+	echo "reject remount: $opts" >> "$seqres.full"
+	timeout --kill-after=5s 30 mount -o "remount,credentials=$CIFS_CRED_FILE,$opts" \
+		"$CIFS_TEST_MNT" > "$tmp.remount" 2>&1
+	result=$?
+	cat "$tmp.remount" >> "$seqres.full"
+	[ "$result" -ne 0 ] || _fail "immutable remount option accepted: $opts"
+	[ "$result" -ne 124 ] && [ "$result" -ne 137 ] || _fail "negative remount timed out"
+	grep -Eiq 'mount error\(22\)|Invalid argument' "$tmp.remount" ||
+		_fail "remount failed for an unexpected reason: $opts"
+	[ "$(cat "$CIFS_TEST_WORK/data")" = positive-control ] || _fail "rejected remount changed data"
 done
 
 echo "invalid mount options error paths OK"
