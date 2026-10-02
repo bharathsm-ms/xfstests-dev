@@ -1,0 +1,76 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-2.0
+#
+# CIFS: DFS cache lifecycle — populate, verify, flush, re-populate
+#
+# Behavior under test
+# - Flush /proc/fs/cifs/dfscache, confirm it is empty.
+# - Mount DFS root and traverse a link to populate the cache.
+# - Verify cache has entries.
+# - Flush cache again with 'echo 0 > /proc/fs/cifs/dfscache'.
+# - Traverse the link again — cache should re-populate.
+# - Verify the cache entry contains the expected target path.
+#
+# Kernel code exercised
+#   dfs_cache.c (add, lookup, flush, re-add)
+
+. ./common/preamble
+. ./common/rc
+. ./common/cifs_dfs
+
+_begin_fstest auto quick dfs
+
+_require_cifs_dfs
+[ "$(id -u)" = 0 ] || _notrun "root required"
+
+_register_cleanup "_cifs_dfs_unmount; _cleanup"
+
+# ── Phase 1: start clean ─────────────────────────────────────
+echo "phase1: flush cache" >> "$seqres.full"
+_cifs_dfs_cache_flush
+
+# Confirm cache is empty (or at least has no real entries)
+if _cifs_dfs_cache_has_entries; then
+	_fail "target DFS cache remained populated after flush"
+fi
+
+# ── Phase 2: populate via traversal ──────────────────────────
+echo "phase2: mount and traverse" >> "$seqres.full"
+_cifs_dfs_mount || _fail "DFS root mount failed"
+
+ls "$CIFS_DFS_MNT/target1/" >> "$seqres.full" 2>&1 || \
+	_fail "ls through DFS link failed"
+
+_cifs_dfs_cache_dump
+_cifs_dfs_cache_has_entries "$CIFS_DFS_ROOT/target1" || \
+	_fail "DFS cache empty after traversal (phase 2)"
+
+echo "phase2: cache populated" >> "$seqres.full"
+
+# ── Phase 3: flush while mounted ─────────────────────────────
+echo "phase3: flush cache while mounted" >> "$seqres.full"
+_cifs_dfs_cache_flush
+
+# ── Phase 4: unmount, remount, re-traverse — cache should re-populate ─
+echo "phase4: remount and re-traverse" >> "$seqres.full"
+_cifs_dfs_unmount || _fail "unmount before cache repopulation"
+
+# Re-mount and traverse again to force fresh DFS referral
+_cifs_dfs_mount || _fail "remount after cache flush failed"
+
+_cifs_dfs_workspace target1
+echo "cache-repopulate-$$" > "$CIFS_DFS_WORK/data" 2>>"$seqres.full" || \
+	_fail "write after remount failed"
+[ "$(cat "$CIFS_DFS_WORK/data")" = "cache-repopulate-$$" ] || _fail "remount data mismatch"
+
+_cifs_dfs_cache_dump
+_cifs_dfs_cache_has_entries "$CIFS_DFS_ROOT/target1" || \
+	_fail "DFS cache empty after re-traversal (phase 4)"
+
+# Clean up
+unlink "$CIFS_DFS_WORK/data" || _fail "remove repopulation fixture"
+
+echo "DFS cache lifecycle OK"
+
+status=0
+exit

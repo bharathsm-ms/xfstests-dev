@@ -138,6 +138,26 @@ _cifs_test_wait()
 	[ "$failures" -eq 0 ] || _fail "$failures I/O workers failed"
 }
 
+_cifs_test_samba_service()
+{
+	if [ -n "${CIFS_SAMBA_CONTROL:-}" ]; then
+		[ -S "$CIFS_SAMBA_CONTROL" ] || return 1
+		timeout --kill-after=5s 60 python3 - "$CIFS_SAMBA_CONTROL" "$1" <<'PY'
+import socket, sys
+with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as control:
+    control.settimeout(55)
+    control.connect(sys.argv[1])
+    control.sendall((sys.argv[2] + '\n').encode('ascii'))
+    with control.makefile('rb') as response:
+        result = response.readline(1024)
+    if result != b'OK\n':
+        raise SystemExit('private Samba control failed: ' + result.decode('ascii', errors='replace'))
+PY
+	else
+		timeout --kill-after=5s 60 systemctl "$1" smbd
+	fi
+}
+
 _cifs_test_ioctl_info()
 {
 	python3 - "$1" "${2:-}" <<'PY'

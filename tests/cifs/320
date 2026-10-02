@@ -1,0 +1,141 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-2.0
+#
+# CIFS: DFS reconnect after TCP disconnect
+#
+# Behavior under test
+# - Mount DFS root, traverse a link, write data.
+# - Disconnect only the new TCP socket opened by referral traversal.
+# - After reconnect window passes, access the DFS link again.
+# - Verify I/O succeeds — the client should re-resolve the DFS referral
+#   and reconnect transparently.
+#
+# Kernel code exercised
+#   reconnect_dfs_server(), dfs_cache_find() (reconnect path),
+#   tree_connect_dfs_target()
+
+. ./common/preamble
+. ./common/rc
+. ./common/cifs_dfs
+
+_begin_fstest auto stress dfs
+
+_require_cifs_dfs
+[ "$(id -u)" = 0 ] || _notrun "root required"
+
+. ./common/cifs_test
+_cifs_test_init
+command -v ss >/dev/null || _notrun "ss required"
+command -v python3 >/dev/null || _notrun "python3 required"
+dfs_stopped_target=
+if [ "${CIFS_DFS_FAILOVER:-}" = yes ]; then
+	[ -S "${CIFS_SAMBA_CONTROL:-}" ] || _notrun "private target controller required"
+	[ -n "${CIFS_DFS_TARGET1:-}" ] && [ -n "${CIFS_DFS_TARGET2:-}" ] ||
+		_notrun "two independent DFS targets required"
+fi
+
+_dfs_restore_320()
+{
+	if [ -n "$dfs_stopped_target" ]; then
+		_cifs_test_samba_service "start-target:$dfs_stopped_target" >> "$seqres.full" 2>&1 || {
+			status=1
+			return 1
+		}
+		dfs_stopped_target=
+	fi
+}
+_register_cleanup "_dfs_restore_320; _cifs_dfs_unmount; _cifs_test_cleanup"
+
+
+# ── Phase 1: mount and write baseline ─────────────────────────
+echo "phase1: mount and write" >> "$seqres.full"
+if [ "${CIFS_DFS_FAILOVER:-}" = yes ]; then
+	_cifs_test_socket_snapshot > "$tmp.before"
+fi
+_cifs_dfs_mount 'nomultichannel,cache=none,echo_interval=1' || _fail "DFS mount failed"
+
+if [ "${CIFS_DFS_FAILOVER:-}" != yes ]; then
+	_cifs_test_socket_snapshot > "$tmp.before"
+fi
+_cifs_dfs_workspace target1
+TESTFILE="$CIFS_DFS_WORK/data"
+echo "pre-disconnect-data" > "$TESTFILE" 2>>"$seqres.full" || \
+	_fail "initial write through DFS failed"
+
+data_before=$(cat "$TESTFILE" 2>>"$seqres.full") || \
+	_fail "initial read failed"
+[ "$data_before" = pre-disconnect-data ] || _fail "baseline DFS data mismatch"
+echo "phase1: data_before='$data_before'" >> "$seqres.full"
+
+# ── Phase 2: induce TCP disconnect ────────────────────────────
+_cifs_test_socket_snapshot > "$tmp.after"
+printf '%s\n' 'sockets before DFS access:' >> "$seqres.full"
+cat "$tmp.before" >> "$seqres.full"
+printf '%s\n' 'sockets after DFS access:' >> "$seqres.full"
+cat "$tmp.after" >> "$seqres.full"
+if [ "${CIFS_DFS_FAILOVER:-}" = yes ]; then
+	first_target=${CIFS_DFS_TARGET1#//}
+	first_target=${first_target%%/*}
+	second_target=${CIFS_DFS_TARGET2#//}
+	second_target=${second_target%%/*}
+	for snapshot in before after; do
+		awk -v first="$first_target:445" -v second="$second_target:445" \
+			'$2 == first || $2 == second' "$tmp.$snapshot" > "$tmp.$snapshot.targets"
+	done
+	_cifs_test_new_socket "$tmp.before.targets" "$tmp.after.targets"
+else
+	_cifs_test_new_socket "$tmp.before" "$tmp.after"
+fi
+_cifs_test_disconnect >> "$seqres.full" 2>&1 || _fail "target TCP disconnect failed"
+if [ "${CIFS_DFS_FAILOVER:-}" = yes ]; then
+	read -r local_endpoint peer_endpoint <<< "$CIFS_TEST_SOCKET"
+	dfs_stopped_target=${peer_endpoint%:*}
+	if [ "$dfs_stopped_target" = "$first_target" ]; then
+		dfs_alternate=$second_target
+	elif [ "$dfs_stopped_target" = "$second_target" ]; then
+		dfs_alternate=$first_target
+	else
+		dfs_stopped_target=
+		_fail "new TCP connection does not belong to either DFS target"
+	fi
+	[ "$first_target" != "$second_target" ] || _fail "DFS targets share an address"
+	echo "stopping $dfs_stopped_target; require alternate $dfs_alternate" >> "$seqres.full"
+	_cifs_test_samba_service "stop-target:$dfs_stopped_target" >> "$seqres.full" 2>&1 ||
+		_fail "stop private DFS target failed"
+fi
+
+# ── Phase 3: verify DFS still works after reconnect ───────────
+echo "phase3: access after reconnect" >> "$seqres.full"
+
+data_after=$(timeout --kill-after=5s 45 cat "$TESTFILE" 2>>"$seqres.full") || \
+	_fail "DFS reconnect read failed or timed out"
+
+echo "phase3: data_after='$data_after'" >> "$seqres.full"
+
+[ "$data_after" = "pre-disconnect-data" ] || \
+	_fail "data mismatch after DFS reconnect: expected 'pre-disconnect-data' got '$data_after'"
+
+# Write new data
+printf 'post-reconnect-data\n' | timeout --kill-after=5s 30 tee "$TESTFILE" \
+	>/dev/null 2>>"$seqres.full" || \
+	_fail "write after DFS reconnect failed"
+data_after=$(timeout --kill-after=5s 30 cat "$TESTFILE" 2>>"$seqres.full") || \
+	_fail "read after DFS reconnect write failed"
+[ "$data_after" = post-reconnect-data ] || _fail "post-reconnect data mismatch"
+if [ "${CIFS_DFS_FAILOVER:-}" = yes ]; then
+	_cifs_test_socket_snapshot > "$tmp.failover"
+	awk -v peer="$dfs_alternate:445" '$2 == peer {found=1} END {exit !found}' "$tmp.failover" ||
+		_fail "no established connection to alternate DFS target"
+fi
+
+# Verify DFS cache is re-populated
+_cifs_dfs_cache_dump
+_cifs_dfs_cache_has_entries "$CIFS_DFS_ROOT/target1" || _fail "target referral lost after reconnect"
+
+# Clean up test file
+unlink "$TESTFILE" 2>/dev/null || true
+
+echo "DFS reconnect after disconnect OK"
+
+status=0
+exit
