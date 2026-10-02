@@ -220,6 +220,7 @@
 320 auto stress dfs
 321 auto quick dfs
 322 auto quick dfs
+332 auto quick krb5 dfs
 334 auto quick
 335 auto quick
 336 auto quick

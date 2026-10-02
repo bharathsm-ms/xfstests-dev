@@ -1,0 +1,81 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-2.0
+#
+# CIFS: Kerberos + DFS — sec=krb5 mount through DFS referral
+#
+# Behavior under test
+# - Mount DFS root with sec=krb5 (Kerberos authentication).
+# - Traverse a DFS link — kernel does DFS referral + krb5 auth.
+# - Write/read data through the DFS-resolved path.
+# - Verify DebugData shows Kerberos session AND DFS origin fullpath.
+# - Verify DFS cache populated.
+#
+# Kernel code exercised
+#   sess.c (SMB2_auth_kerberos on DFS target tree connect)
+#   dfs.c (DFS referral + krb5 auth combined path)
+#   connect.c (tree_connect_dfs_target with Kerberos session)
+
+. ./common/preamble
+. ./common/rc
+. ./common/cifs_krb5
+. ./common/cifs_dfs
+
+_begin_fstest auto quick krb5 dfs
+
+_cifs_krb5_test_init
+_require_cifs_dfs
+[ "$(id -u)" = 0 ] || _notrun "root required"
+
+command -v findmnt >/dev/null || _notrun "findmnt required"
+command -v python3 >/dev/null || _notrun "python3 required"
+_cleanup_332()
+{
+	_cifs_dfs_unmount
+	_cifs_krb5_test_cleanup
+}
+_register_cleanup _cleanup_332
+
+_cifs_krb5_kinit || _fail "kinit failed"
+
+# ── Mount DFS root with sec=krb5 ──────────────────────────────
+echo "mount DFS root with krb5" >> "$seqres.full"
+_cifs_krb5_test_mount krb5 cache=none "$CIFS_DFS_ROOT"
+CIFS_DFS_MNT=$KRB_MNT
+_cifs_dfs_private_dir=$KRB_MNT
+_cifs_dfs_owned_mount=true
+unset '_cifs_test_mounts[-1]' '_cifs_test_dirs[-1]'
+_cifs_dfs_workspace target1
+
+# ── Traverse DFS link with krb5 auth ─────────────────────────
+echo "traverse DFS link target1" >> "$seqres.full"
+TESTFILE="$CIFS_DFS_WORK/data"
+echo "krb5-dfs-combined" > "$TESTFILE" || _fail "write through Kerberos DFS referral failed"
+
+data=$(cat "$TESTFILE" 2>>"$seqres.full") || _fail "read through DFS+krb5 failed"
+[ "$data" = "krb5-dfs-combined" ] || _fail "data mismatch: '$data'"
+
+# ── Verify Kerberos session in DebugData ──────────────────────
+echo "verify Kerberos + DFS in DebugData" >> "$seqres.full"
+_cifs_krb5_verify_session || _fail "DFS namespace session is not Kerberos"
+python3 - "$TESTFILE" "$KRB_MNT" >> "$seqres.full" 2>&1 <<'PY'
+import json, subprocess, sys
+result = subprocess.run(['findmnt', '--kernel', '--json', '--target', sys.argv[1], '-o', 'TARGET,OPTIONS'], check=True, capture_output=True, text=True)
+mounts = json.loads(result.stdout)['filesystems']
+assert len(mounts) == 1
+assert mounts[0]['target'].startswith(sys.argv[2] + '/'), 'file did not traverse a DFS automount'
+options = set(mounts[0]['options'].split(','))
+assert options & {'sec=krb5', 'sec=krb5i'}, 'DFS target is not using Kerberos'
+PY
+[ "$?" -eq 0 ] || _fail "DFS target mount/authentication mismatch"
+
+# ── Verify DFS cache populated ────────────────────────────────
+_cifs_dfs_cache_dump
+_cifs_dfs_cache_has_entries "$CIFS_DFS_ROOT/target1" || _fail "target1 referral missing from DFS cache"
+
+# Clean up
+unlink "$TESTFILE" 2>/dev/null || true
+
+echo "Kerberos with DFS OK"
+
+status=0
+exit

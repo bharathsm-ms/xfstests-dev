@@ -1,0 +1,183 @@
+# SPDX-License-Identifier: GPL-2.0
+# Common Kerberos helper functions for CIFS tests.
+#
+# Requires in local.config:
+#   CIFS_KRB5_REALM   - Kerberos realm (e.g. XFSTEST.LOCAL)
+#   CIFS_KRB5_USER    - Kerberos principal username (e.g. xfstest)
+#   CIFS_KRB5_PASS    - Password for the principal, unless a keytab is supplied
+#   CIFS_KRB5_KEYTAB  - Optional root-owned mode 0600 principal keytab
+#   CIFS_KRB5_UID     - Dedicated non-root local UID for private test credentials
+#
+# Also uses:
+#   CIFS_CRED_FILE    - credentials file (for non-krb5 fallback)
+#   TEST_DEV          - UNC to mount
+
+. ./common/cifs_debug
+
+_cifs_krb5_test_init()
+{
+	. ./common/cifs_test
+	_cifs_test_init
+	_register_cleanup _cifs_krb5_test_cleanup
+	_require_cifs_krb5
+}
+
+_cifs_krb5_test_cleanup()
+{
+	_cifs_krb5_kdestroy || status=1
+	_cifs_test_cleanup
+}
+
+_cifs_krb5_test_mount()
+{
+	local security="${1:-krb5}" extra="${2:-}" unc="${3:-$TEST_DEV}" result
+	KRB_MNT=$(mktemp -d "/tmp/cifs$seq.krb5.XXXXXXXX") || _fail "create private Kerberos mountpoint"
+	_cifs_test_dirs+=("$KRB_MNT")
+	_cifs_krb5_do_mount "$security" "$KRB_MNT" "$extra" "$unc"
+	result=$?
+	if awk -v target="$KRB_MNT" '$2 == target {found=1} END {exit !found}' /proc/self/mounts; then
+		_cifs_test_mounts+=("$KRB_MNT")
+	fi
+	[ "$result" -eq 0 ] || _fail "requested Kerberos mount/session validation failed"
+}
+
+_cifs_krb5_acquire()
+{
+	local cache="$1"
+	if [ -n "${CIFS_KRB5_KEYTAB:-}" ]; then
+		timeout --kill-after=5s 20 kinit -k -t "$CIFS_KRB5_KEYTAB" \
+			-c "$cache" "$CIFS_KRB5_USER@$CIFS_KRB5_REALM"
+	else
+		printf '%s\n' "$CIFS_KRB5_PASS" | timeout --kill-after=5s 20 \
+			kinit -c "$cache" "$CIFS_KRB5_USER@$CIFS_KRB5_REALM"
+	fi
+}
+
+# Skip test if Kerberos is not configured
+_require_cifs_krb5()
+{
+	[ "$FSTYP" = "cifs" ] || _notrun "requires CIFS"
+	[ -n "${CIFS_KRB5_REALM:-}" ] || \
+		_notrun "CIFS_KRB5_REALM not set — Kerberos not configured in local.config"
+	[ -n "${CIFS_KRB5_USER:-}" ] || \
+		_notrun "CIFS_KRB5_USER not set"
+	if [ -n "${CIFS_KRB5_KEYTAB:-}" ]; then
+		[ -f "$CIFS_KRB5_KEYTAB" ] && [ -r "$CIFS_KRB5_KEYTAB" ] && \
+			[ "$(stat -c '%u:%a' "$CIFS_KRB5_KEYTAB")" = 0:600 ] || \
+			_notrun "CIFS_KRB5_KEYTAB must be readable, root-owned, and mode 0600"
+	else
+		[ -n "${CIFS_KRB5_PASS:-}" ] || _notrun "CIFS_KRB5_PASS or CIFS_KRB5_KEYTAB not set"
+	fi
+	command -v kinit >/dev/null 2>&1 || \
+		_notrun "kinit not found — install krb5-user"
+	command -v klist >/dev/null 2>&1 || \
+		_notrun "klist not found"
+	command -v kdestroy >/dev/null 2>&1 || \
+		_notrun "kdestroy not found"
+	command -v timeout >/dev/null || _notrun "timeout required"
+	local probe result
+	probe=$(mktemp -d "$tmp.krb5-probe.XXXXXXXX") || _fail "create private Kerberos probe"
+	_cifs_krb5_acquire "FILE:$probe/cache" > "$probe/result" 2>&1
+	result=$?
+	cat "$probe/result" >> "$seqres.full"
+	rm -f "$probe/cache"
+	if [ "$result" -ne 0 ]; then
+		if grep -qiE 'Password incorrect|Preauthentication failed' "$probe/result"; then
+			rm -rf "$probe"
+			_notrun "Kerberos credentials rejected by KDC"
+		fi
+		rm -rf "$probe"
+		_notrun "private kinit probe failed (status $result); see full log"
+	fi
+	rm -rf "$probe"
+}
+
+# Obtain a Kerberos ticket for the test user.
+# A non-root credential UID lets cifs.upcall discover KRB5CCNAME.
+_cifs_krb5_kinit()
+{
+	[[ "${CIFS_KRB5_UID:-}" =~ ^[1-9][0-9]*$ ]] ||
+		_notrun "CIFS_KRB5_UID must identify a dedicated non-root credential owner"
+	getent passwd "$CIFS_KRB5_UID" >/dev/null || _notrun "CIFS_KRB5_UID does not exist"
+	command -v setpriv >/dev/null || _notrun "setpriv required for private credential ownership"
+	if [ -z "${_cifs_krb5_cache_dir:-}" ]; then
+		_cifs_krb5_old_cache=${KRB5CCNAME-}
+		_cifs_krb5_old_cache_set=${KRB5CCNAME+x}
+		_cifs_krb5_cache_dir=$(mktemp -d "$tmp.krb5.XXXXXXXX") || _fail "create private credential cache"
+		chown "$CIFS_KRB5_UID" "$_cifs_krb5_cache_dir" || _fail "set private cache owner"
+	fi
+	export KRB5CCNAME="FILE:$_cifs_krb5_cache_dir/cache"
+	if [ -n "${CIFS_KRB5_KEYTAB:-}" ]; then
+		_cifs_krb5_acquire "$KRB5CCNAME" >> "$seqres.full" 2>&1 || return 1
+		chown "$CIFS_KRB5_UID" "$_cifs_krb5_cache_dir/cache"
+		return $?
+	fi
+	printf '%s\n' "$CIFS_KRB5_PASS" | setpriv --reuid="$CIFS_KRB5_UID" \
+		--regid="$(id -g "$CIFS_KRB5_UID")" --clear-groups timeout --kill-after=5s 20 \
+		kinit -c "$KRB5CCNAME" "$CIFS_KRB5_USER@$CIFS_KRB5_REALM" >> "$seqres.full" 2>&1
+}
+
+# Destroy the current Kerberos ticket cache
+_cifs_krb5_kdestroy()
+{
+	[ -n "${_cifs_krb5_cache_dir:-}" ] || return 0
+	rm -f "$_cifs_krb5_cache_dir/cache" || return 1
+	rmdir "$_cifs_krb5_cache_dir" || return 1
+	_cifs_krb5_cache_dir=
+	if [ -n "$_cifs_krb5_old_cache_set" ]; then
+		export KRB5CCNAME=$_cifs_krb5_old_cache
+	else
+		unset KRB5CCNAME
+	fi
+}
+
+# Mount with sec=krb5. Args: $1=mount_point $2=extra_opts
+_cifs_krb5_mount()
+{
+	_cifs_krb5_do_mount krb5 "$@"
+}
+
+# Mount with sec=krb5i (integrity). Args: $1=mount_point $2=extra_opts
+_cifs_krb5i_mount()
+{
+	_cifs_krb5_do_mount krb5i "$@"
+}
+
+# Mount with sec=krb5p (privacy). Args: $1=mount_point $2=extra_opts
+_cifs_krb5p_mount()
+{
+	_cifs_krb5_do_mount krb5p "$@"
+}
+
+_cifs_krb5_do_mount()
+{
+	local security="$1" mnt="${2:-$tmp.krb5-mnt}" extra="${3:-}" unc="${4:-$TEST_DEV}"
+	local before after connection
+	[ -r /proc/fs/cifs/DebugData ] || _notrun "DebugData required for session validation"
+	mkdir -p "$mnt" || return 1
+	before=$(_cifs_debug_share "$unc" | awk '{print $1}' | sort -u)
+	timeout --kill-after=5s 30 mount -t cifs "$unc" "$mnt" \
+		-o "${extra:+$extra,}sec=$security,vers=3.1.1,cruid=$CIFS_KRB5_UID,nosharesock" 2>> "$seqres.full" || return 1
+	after=$(_cifs_debug_share "$unc" | awk '{print $1}' | sort -u)
+	connection=$(comm -13 <(printf '%s\n' "$before") <(printf '%s\n' "$after"))
+	[[ "$connection" =~ ^(0x[[:xdigit:]]+|[0-9]+)$ ]] || return 1
+	_cifs_krb5_connection=$connection
+	_cifs_krb5_unc=$unc
+	_cifs_krb5_mnt=$mnt
+	_cifs_krb5_verify_session
+}
+
+# Check the connection created by the last Kerberos mount.
+_cifs_krb5_verify_session()
+{
+	[ "$(_cifs_krb5_get_security_type "${_cifs_krb5_mnt:-}")" = Kerberos ]
+}
+
+# Get the security type for the session connected to a given mount point
+_cifs_krb5_get_security_type()
+{
+	[ -n "${_cifs_krb5_connection:-}" ] || return 1
+	[ "${1:-$_cifs_krb5_mnt}" = "$_cifs_krb5_mnt" ] || return 1
+	_cifs_debug_share "$_cifs_krb5_unc" |
+		awk -v connection="$_cifs_krb5_connection" '$1==connection {print $8}' | sort -u
+}

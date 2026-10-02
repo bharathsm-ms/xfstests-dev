@@ -69,6 +69,7 @@ inobtcount		XFS inode btree count tests
 insert			fallocate FALLOC_FL_INSERT_RANGE
 ioctl			general ioctl tests
 io_uring		general io_uring async io tests
+krb5			Kerberos authentication and session handling
 label			filesystem labelling
 limit			resource limits
 locks			file locking
