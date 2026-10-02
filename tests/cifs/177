@@ -4,20 +4,20 @@
 # CIFS: SMB3 multichannel failover
 #
 # Behavior under test
-# - Mount with multichannel and verify >=2 allocated channels and >=2 server
-#   interface IPs in DebugData.
-# - Drop traffic to one server IP (port 445) and verify I/O continues.
-# - Restore traffic and verify channels recover (>=2).
+# - Verify two channels on an isolated connection, disconnect one owned
+#   socket, and verify data and channel recovery.
 
 . ./common/preamble
 . ./common/rc
 _begin_fstest auto quick
+. ./common/cifs_debug
 
 [ "$FSTYP" = "cifs" ] || _notrun "requires CIFS"
 [ "$(id -u)" = 0 ] || _notrun "root required"
 [ -n "$TEST_DEV" ] || _notrun "TEST_DEV not set"
 [ -n "$TEST_DIR" ] || _notrun "TEST_DIR not set"
-command -v iptables >/dev/null 2>&1 || _notrun "iptables required"
+command -v ss >/dev/null 2>&1 || _notrun "ss required"
+command -v python3 >/dev/null 2>&1 || _notrun "python3 required"
 
 _host_from_unc() { echo "$1" | sed -E 's#^//([^/]+)/.*#\1#'; }
 _share_from_unc() { echo "$1" | sed -E 's#^//[^/]+/([^/]+).*#\1#'; }
@@ -27,107 +27,34 @@ HOST=$(_host_from_unc "$TEST_DEV")
 UNCW=$(_unc_windows "$TEST_DEV")
 [ -n "$HOST" ] || _notrun "could not derive host"
 
-_dd_allocated_channels_sum_for_host()
-{
-    local host="$1" snap
-    snap=$(cat /proc/fs/cifs/DebugData 2>/dev/null)
-    echo "$snap" >> $seqres.full
-    echo "$snap" | awk -v HOST="$host" '
-        BEGIN { tl=tolower(HOST); in_block=0; target=0; in_if=0; sum=0; printed=0 }
-        /^[[:space:]]*[0-9]+[)].*ConnectionId:/ {
-            if (in_block==1 && target==1 && in_if==1) { print sum; printed=1; exit }
-            in_block=1; target=0; in_if=0; sum=0; next
-        }
-        in_block==1 {
-            line=tolower($0)
-            if (index(line, tl)>0) target=1
-            if ($1=="Server" && $2=="interfaces:") { in_if=1; next }
-            if ((NF==0 || ($0 ~ /^[[:space:]]*[0-9]+[)].*ConnectionId:/)) && target==1 && in_if==1) { print sum; printed=1; exit }
-            if (in_if==1 && $1=="Allocated" && $2=="channels:") { n=$3+0; sum+=n }
-        }
-        END { if (printed==0 && in_block==1 && target==1 && in_if==1) print sum }
-    '
-}
-
-_dd_server_ips_for_host()
-{
-    local host="$1" snap
-    snap=$(cat /proc/fs/cifs/DebugData 2>/dev/null)
-    echo "$snap" >> $seqres.full
-    echo "$snap" | awk -v HOST="$host" '
-        BEGIN { tl=tolower(HOST); in_block=0; target=0; in_if=0; ip="" }
-        /^[[:space:]]*[0-9]+[)].*ConnectionId:/ {
-            in_block=1; target=0; in_if=0; ip=""; next
-        }
-        in_block==1 {
-            line=tolower($0)
-            if (index(line, tl)>0) target=1
-            if ($1=="Server" && $2=="interfaces:") { in_if=1; next }
-            if (in_if==1 && NF==0) { in_if=0; ip=""; next }
-            if (target==1 && in_if==1) {
-                if (match($0, /([0-9]{1,3}\.){3}[0-9]{1,3}/, m)) ip=m[0]
-                if ($1=="Allocated" && $2=="channels:" && ip!="") {
-                    if ($3+0 > 0) print ip
-                }
-            }
-        }
-    '
-}
-
-_register_cleanup "_test_unmount >/dev/null 2>&1; iptables -D OUTPUT -d $DROP_IP -p tcp --dport 445 -j DROP 2>/dev/null || true; iptables -D INPUT -s $DROP_IP -p tcp --sport 445 -j DROP 2>/dev/null || true; rm -f \"$TEST_DIR/.cifs177.$$\" >/dev/null 2>&1"
-
-_test_unmount > /dev/null 2>&1
-_do "_test_mount -o multichannel,max_channels=2" || _notrun "mount with multichannel failed"
+command -v timeout >/dev/null 2>&1 || _notrun "timeout required"
+[ -r /proc/fs/cifs/DebugData ] || _notrun "DebugData unavailable"
+. ./common/cifs_test
+_cifs_test_init
+_cifs_test_socket_snapshot > "$tmp.sockets-before"
+_cifs_test_mount_connection 'vers=3.1.1,multichannel,max_channels=2,cache=none,echo_interval=1'
+_cifs_test_workspace "$CIFS_TEST_MNT"
+FILE="$CIFS_TEST_WORK/data"
 
 # Light I/O to activate connection
-FILE="$TEST_DIR/.cifs177.$$"
-echo 1 > "$FILE" 2>/dev/null || true
+echo 1 > "$FILE" || _fail "create test file failed"
 
 # Require >=2 channels
-sum=$(_dd_allocated_channels_sum_for_host "$HOST" | awk 'NR==1{print $1+0}')
-[ -n "$sum" ] || _notrun "DebugData lacks Server interfaces for $UNCW"
-[ "$sum" -ge 2 ] || _notrun "multichannel not active (sum=$sum)"
+_cifs_wait_multichannel "$TEST_DEV" 2 "$CIFS_TEST_CONNECTION"
 
-# Extract server interface IPs with allocated channels
-ips=$(_dd_server_ips_for_host "$HOST" | sort -u)
-num_ips=$(echo "$ips" | wc -w)
-[ "$num_ips" -ge 2 ] || _notrun "need >=2 server interface IPs for failover (got $num_ips)"
-
-DROP_IP=$(echo "$ips" | awk '{print $1}')
-[ -n "$DROP_IP" ] || _notrun "no IP chosen for drop"
-
-# Drop one channel IP
-iptables -I OUTPUT -d "$DROP_IP" -p tcp --dport 445 -j DROP 2>>$seqres.full || _notrun "iptables rule fail"
-iptables -I INPUT -s "$DROP_IP" -p tcp --sport 445 -j DROP 2>>$seqres.full || _notrun "iptables rule fail"
-
-# Allow failover window
-sleep 2
+_cifs_test_socket_snapshot > "$tmp.sockets-after"
+comm -13 "$tmp.sockets-before" "$tmp.sockets-after" > "$tmp.new-sockets"
+[ "$(wc -l < "$tmp.new-sockets")" -eq 2 ] || _notrun "cannot isolate exactly two new channel sockets"
+CIFS_TEST_SOCKET=$(head -n 1 "$tmp.new-sockets")
+_cifs_test_disconnect >> "$seqres.full" 2>&1 || _fail "disconnect owned channel failed"
 
 # Verify I/O still works
-tries=10
-while [ $tries -gt 0 ]; do
-    dd if=/dev/zero of="$FILE" bs=4096 count=4 oflag=direct status=none || dd if=/dev/zero of="$FILE" bs=4096 count=4 status=none || true
-    dd if="$FILE" of=/dev/null bs=4096 count=2 iflag=direct status=none || dd if="$FILE" of=/dev/null bs=4096 count=2 status=none || true
-    if [ $? -eq 0 ]; then
-        break
-    fi
-    tries=$((tries-1)); sleep 0.5
-done
-[ $tries -gt 0 ] || _fail "I/O failed after dropping channel IP $DROP_IP"
+dd if=/dev/urandom of="$tmp.expected" bs=4096 count=4 status=none || _fail "prepare data failed"
+timeout -k 5 30 dd if="$tmp.expected" of="$FILE" bs=4096 oflag=direct conv=fsync status=none 2>>$seqres.full || _fail "write failed after dropping channel IP"
+timeout -k 5 30 dd if="$FILE" of="$tmp.actual" bs=4096 iflag=direct status=none 2>>$seqres.full || _fail "read failed after dropping channel IP"
+cmp "$tmp.expected" "$tmp.actual" || _fail "data mismatch after channel failover"
 
-# Restore traffic
-iptables -D OUTPUT -d "$DROP_IP" -p tcp --dport 445 -j DROP 2>>$seqres.full || true
-iptables -D INPUT -s "$DROP_IP" -p tcp --sport 445 -j DROP 2>>$seqres.full || true
-
-# Wait for channel recovery
-tries=30
-while [ $tries -gt 0 ]; do
-    sum=$(_dd_allocated_channels_sum_for_host "$HOST" | awk 'NR==1{print $1+0}')
-    echo "recovery: sum=$sum tries=$tries" >> $seqres.full
-    [ -n "$sum" ] && [ "$sum" -ge 2 ] && break
-    tries=$((tries-1)); sleep 0.5
-done
-[ $tries -gt 0 ] || _fail "channels did not recover after restoring $DROP_IP"
+_cifs_wait_multichannel "$TEST_DEV" 2 "$CIFS_TEST_CONNECTION"
 
 echo "Multichannel failover OK"
 

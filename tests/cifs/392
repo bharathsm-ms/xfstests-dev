@@ -1,0 +1,48 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-2.0
+# CIFS: Multichannel limits and data integrity on independent connections
+#
+# Kernel code exercised
+#   sess.c     (cifs_decrease_secondary_channels, cifs_select_sectype)
+#   connect.c  (cifs_match_super, match_server, match_session)
+#   smb2ops.c  (smb3_qfs_tcon)
+
+. ./common/preamble
+. ./common/rc
+
+_begin_fstest auto quick
+
+[ "$FSTYP" = "cifs" ] || _notrun "requires CIFS"
+[ "$(id -u)" = 0 ] || _notrun "root required"
+[ -n "$TEST_DEV" ] || _notrun "TEST_DEV not set"
+[ -n "$CIFS_CRED_FILE" ] || _notrun "CIFS_CRED_FILE not set"
+
+. ./common/cifs_test
+. ./common/cifs_debug
+_cifs_test_init
+[ -r /proc/fs/cifs/DebugData ] || _notrun "DebugData required"
+dd if=/dev/urandom of="$tmp.expected" bs=1M count=2 status=none || _fail "prepare expected data"
+for maximum in 1 2 4; do
+        _cifs_debug_share "$TEST_DEV" | awk '{print $1}' | sort -u > "$tmp.before"
+        _cifs_test_mount "vers=3.1.1,max_channels=$maximum,cache=none"
+        _cifs_debug_share "$TEST_DEV" | awk '{print $1}' | sort -u > "$tmp.after"
+        connection=$(comm -13 "$tmp.before" "$tmp.after")
+        [[ "$connection" =~ ^(0x[[:xdigit:]]+|[0-9]+)$ ]] || _fail "cannot identify new multichannel connection"
+        required=2
+        [ "$maximum" -ne 1 ] || required=1
+        _cifs_wait_multichannel "$TEST_DEV" "$required" "$connection"
+        [ "$CIFS_CHANNELS" -le "$maximum" ] || _fail "channel count exceeds requested limit"
+        _cifs_test_workspace "$CIFS_TEST_MNT"
+        for worker in $(seq 1 4); do
+                (dd if="$tmp.expected" of="$CIFS_TEST_WORK/data-$worker" bs=64K conv=fsync status=none &&
+                        cmp "$tmp.expected" "$CIFS_TEST_WORK/data-$worker") &
+                _cifs_test_children+=("$!")
+        done
+        _cifs_test_wait
+        _cifs_wait_multichannel "$TEST_DEV" "$required" "$connection"
+        [ "$CIFS_CHANNELS" -le "$maximum" ] || _fail "post-I/O channel count exceeds requested limit"
+done
+
+echo "Silence is golden"
+status=0
+exit

@@ -61,6 +61,18 @@ _cifs_test_workspace()
 	_cifs_test_files+=("$CIFS_TEST_WORK")
 }
 
+_cifs_test_mount_connection()
+{
+	local device="${2:-$TEST_DEV}"
+	. ./common/cifs_debug
+	[ -r /proc/fs/cifs/DebugData ] || _notrun "DebugData required"
+	_cifs_debug_share "$device" | awk '{print $1}' | sort -u > "$tmp.connections-before"
+	_cifs_test_mount "$1" "$device"
+	_cifs_debug_share "$device" | awk '{print $1}' | sort -u > "$tmp.connections-after"
+	CIFS_TEST_CONNECTION=$(comm -13 "$tmp.connections-before" "$tmp.connections-after")
+	[[ "$CIFS_TEST_CONNECTION" =~ ^(0x[[:xdigit:]]+|[0-9]+)$ ]] || _fail "cannot identify new test-owned connection"
+}
+
 _cifs_test_mount_option()
 {
 	awk -v target="$CIFS_TEST_MNT" -v expected="$1" '

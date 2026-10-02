@@ -15,6 +15,7 @@
 . ./common/preamble
 . ./common/rc
 _begin_fstest auto quick
+. ./common/cifs_debug
 
 [ "$FSTYP" = "cifs" ] || _notrun "requires CIFS"
 [ -n "$TEST_DEV" ] || _notrun "TEST_DEV not set"
@@ -28,75 +29,23 @@ HOST=$(_host_from_unc "$TEST_DEV")
 UNCW=$(_unc_windows "$TEST_DEV")
 [ -n "$HOST" ] || _notrun "could not derive host"
 
-_dd_allocated_channels_sum_for_host()
-{
-    local host="$1"; local snap
-    snap=$(cat /proc/fs/cifs/DebugData 2>/dev/null)
-    echo "$snap" >> $seqres.full
-    echo "$snap" | awk -v HOST="$host" '
-        BEGIN { tl=tolower(HOST); in_block=0; target=0; in_if=0; sum=0; printed=0 }
-        /^[[:space:]]*[0-9]+[)].*ConnectionId:/ {
-            if (in_block==1 && target==1 && in_if==1) { print sum; printed=1; exit }
-            in_block=1; target=0; in_if=0; sum=0; next
-        }
-        in_block==1 {
-            line=tolower($0)
-            if (index(line, tl)>0) target=1
-            if ($1=="Server" && $2=="interfaces:") { in_if=1; next }
-            if ((NF==0 || ($0 ~ /^[[:space:]]*[0-9]+[)].*ConnectionId:/)) && target==1 && in_if==1) { print sum; printed=1; exit }
-            if (in_if==1 && $1=="Allocated" && $2=="channels:") { n=$3+0; sum+=n }
-        }
-        END { if (printed==0 && in_block==1 && target==1 && in_if==1) print sum }
-    '
-}
-
-_resolve_host_ips() { getent ahosts "$1" | awk '{print $1}' | sort -u; }
-
-_tcp_conns_to_host_count()
-{
-    local host="$1" ips
-    ips=$(_resolve_host_ips "$host")
-    [ -n "$ips" ] || { echo 0; return; }
-    if command -v ss >/dev/null 2>&1; then
-        ss -tanH 2>/dev/null | awk -v IPS="$(echo $ips)" '
-            BEGIN { split(IPS,a," "); }
-            { r=$5; if (r ~ /:445$/ || r ~ /:139$/) { for (i in a) if (index(r,a[i])>0) { c++; break } } }
-            END { print c+0 }
-        '
-    else
-        netstat -tan 2>/dev/null | sed '1,2d' | awk -v IPS="$(echo $ips)" '
-            BEGIN { split(IPS,a," "); }
-            { r=$5; if (r ~ /:445$/ || r ~ /:139$/) { for (i in a) if (index(r,a[i])>0) { c++; break } } }
-            END { print c+0 }
-        '
-    fi
-}
-
-_register_cleanup "_test_unmount >/dev/null 2>&1; rm -f \"$TEST_DIR/.cifs107.$$\" >/dev/null 2>&1; rm -f \"$TEST_DIR/.cifs107.$$.bin\" >/dev/null 2>&1"
+command -v ss >/dev/null 2>&1 || _notrun "ss required"
+[ -r /proc/fs/cifs/DebugData ] || _notrun "DebugData unavailable"
+. ./common/cifs_test
+_cifs_test_init
 
 # Request exactly two channels
-_test_unmount > /dev/null 2>&1
-_do "_test_mount -o multichannel,max_channels=2" || _fail "mount TEST_DEV with multichannel,max_channels=2 failed"
+_cifs_test_mount_connection 'vers=3.1.1,multichannel,max_channels=2'
+_cifs_test_workspace "$CIFS_TEST_MNT"
 
 # Trigger activity
-echo 1 > "$TEST_DIR/.cifs107.$$" 2>/dev/null || true
-dd if=/dev/zero of="$TEST_DIR/.cifs107.$$.bin" bs=1M count=4 oflag=direct status=none 2>>$seqres.full || true
+dd if=/dev/urandom of="$tmp.expected" bs=1M count=4 status=none || _fail "prepare expected data"
+dd if="$tmp.expected" of="$CIFS_TEST_WORK/data" bs=1M oflag=direct conv=fsync status=none 2>>$seqres.full || _fail "activation I/O failed"
+cmp "$tmp.expected" "$CIFS_TEST_WORK/data" || _fail "activation data mismatch"
 
 # Poll for DebugData sum
-tries=30
-sum=""
-while [ $tries -gt 0 ]; do
-    sum=$(_dd_allocated_channels_sum_for_host "$HOST" | awk 'NR==1{print $1+0}')
-    echo "max_channels: DebugData sum='${sum}' tries=$tries" >> $seqres.full
-    [ -n "$sum" ] && [ "$sum" -ge 1 ] && break
-    tries=$((tries-1)); sleep 0.2
-done
-
-[ -n "$sum" ] || _notrun "DebugData lacks Server interfaces for $UNCW"
-
-if [ "$sum" -lt 2 ]; then
-    _notrun "multichannel appears unsupported: allocated channels=$sum (<2) for $UNCW"
-fi
+_cifs_wait_multichannel "$TEST_DEV" 2 "$CIFS_TEST_CONNECTION"
+sum=$CIFS_CHANNELS
 
 if [ "$sum" -ne 2 ]; then
     _fail "expected DebugData allocated channels sum=2, got $sum"
@@ -106,7 +55,7 @@ fi
 tries=20
 sc=0
 while [ $tries -gt 0 ]; do
-    sc=$(_tcp_conns_to_host_count "$HOST")
+    sc=$(_cifs_tcp_connections "$HOST" "$CIFS_INTERFACE_IPS")
     echo "sockets: count=$sc (tries=$tries)" >> $seqres.full
     [ "$sc" -ge 2 ] && break
     tries=$((tries-1)); sleep 0.3

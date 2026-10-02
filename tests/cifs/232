@@ -15,6 +15,9 @@
 . ./common/preamble
 . ./common/rc
 _begin_fstest auto quick
+. ./common/cifs_debug
+. ./common/cifs_test
+_cifs_test_init
 
 [ "$FSTYP" = "cifs" ] || _notrun "requires CIFS"
 [ -n "$TEST_DEV" ] || _notrun "TEST_DEV not set"
@@ -33,55 +36,39 @@ have_open_dirs=false
 [ -r "$OPEN_DIRS" ] && have_open_dirs=true
 
 _stats_creates() {
-    cat /proc/fs/cifs/Stats 2>/dev/null | awk -v UNC="$UNCW" '
-        BEGIN { inb=0; cr=0 }
-        /^[[:space:]]*[0-9]+\) / { inb = (index($0, UNC) > 0) ? 1 : 0; next }
-        inb==1 && NF==0 { inb=0 }
-        inb==1 && $1=="Creates:" { cr=$2 }
-        END { print cr+0 }
-    '
+    _cifs_stat "$TEST_DEV" "Creates:"
 }
 
-# Count non-header lines in open_dirs matching our mount path
 _open_dirs_count() {
-    local dir="$1"
-    local cnt
-    cnt=$(cat "$OPEN_DIRS" 2>/dev/null | grep -v '^#' | grep -c "$dir" 2>/dev/null) || cnt=0
-    echo $((cnt + 0))
+    local session
+    session=$(_cifs_debug_share "$TEST_DEV" | awk -v connection="$CIFS_TEST_CONNECTION" '$1 == connection {print $2}')
+    awk -v session="$session" -v path="${W##*/}" '
+        $2==session && $1 ~ /^0x/ {
+            name=$5; gsub(/\\/, "/", name); sub(/^\/+/, "", name)
+            if (name==path) count++
+        }
+        END { print count+0 }
+    ' "$OPEN_DIRS"
 }
 
-_register_cleanup "_test_unmount >/dev/null 2>&1; rm -rf \"$TEST_DIR/cifs232.$$\" >/dev/null 2>&1"
-
-# To ensure nohandlecache takes effect, we must tear down the entire SMB
-# session between phases. If SCRATCH_DEV keeps the session alive, the kernel
-# reuses the existing tcon (with cached_fids already initialized) and the
-# nohandlecache flag is ignored. So we also unmount scratch between phases.
-_scratch_unmount_cmd() {
-    [ -n "$SCRATCH_MNT" ] && umount "$SCRATCH_MNT" >/dev/null 2>&1 || true
-    [ -n "$SCRATCH_DEV" ] && umount "$SCRATCH_DEV" >/dev/null 2>&1 || true
+_readdir_232() {
+    LC_ALL=C ls -1 "$W" > "$tmp.listing" || _fail "readdir failed"
+    cmp "$tmp.expected" "$tmp.listing" || _fail "directory inventory mismatch"
 }
-_scratch_remount_cmd() {
-    if [ -n "$SCRATCH_MNT" ] && [ -n "$SCRATCH_DEV" ]; then
-        local sopts
-        sopts=$(echo "${MOUNT_OPTIONS:-}" | sed -e 's/^[[:space:]]*-o[[:space:]]*//' -e 's/^[[:space:]]*//')
-        mount -t cifs "$SCRATCH_DEV" "$SCRATCH_MNT" -o "$sopts" >/dev/null 2>&1 || true
-    fi
-}
+printf 'f1\nf2\nf3\nf4\nf5\n' > "$tmp.expected" || _fail "prepare directory inventory"
 
 # ============================================================
 # Phase 1: Mount normally (with dir handle caching)
 # ============================================================
-_test_unmount > /dev/null 2>&1
-_do "_test_mount" || _fail "normal mount failed"
-
-W="$TEST_DIR/cifs232.$$"
-mkdir -p "$W" || _fail "mkdir failed"
-for i in $(seq 1 5); do echo "f$i" > "$W/f$i"; done
-sync
+_cifs_test_mount_connection 'vers=3.1.1,actimeo=0'
+_cifs_test_workspace "$CIFS_TEST_MNT"
+W=$CIFS_TEST_WORK
+for i in $(seq 1 5); do echo "f$i" > "$W/f$i" || _fail "create file failed"; done
+sync -f "$W" || _fail "sync directory fixture"
 
 # Trigger readdir multiple times to populate cache
 for i in $(seq 1 10); do
-    ls "$W" >/dev/null 2>&1
+    _readdir_232
 done
 sleep 1
 
@@ -93,26 +80,23 @@ fi
 
 cr_cached=0
 cr0=$(_stats_creates)
-if [ "$cr0" -gt 0 ]; then
-    for i in $(seq 1 5); do ls "$W" >/dev/null 2>&1; done
-    cr1=$(_stats_creates)
+if [ -n "$cr0" ]; then
+    for i in $(seq 1 5); do _readdir_232; done
+    cr1=$(_stats_creates) || _fail "cached Creates counter disappeared"
     cr_cached=$((cr1 - cr0))
     echo "phase1 (cached): stats creates delta=$cr_cached" >> $seqres.full
 fi
 
-_test_unmount > /dev/null 2>&1
-
-# Also unmount scratch to tear down the shared session completely.
-# Without this, the kernel reuses the old tcon and nohandlecache is ignored.
-_scratch_unmount_cmd
-sleep 2
+rm -rf "$W" || _fail "cached fixture cleanup failed"
 
 # ============================================================
 # Phase 2: Mount with nohandlecache
 # ============================================================
-_do "_test_mount -o nohandlecache" || _notrun "mount with nohandlecache failed"
-# Remount scratch so the framework can clean up normally
-_scratch_remount_cmd
+_cifs_test_mount_connection 'vers=3.1.1,actimeo=0,nohandlecache'
+_cifs_test_mount_option nohandlecache
+_cifs_test_workspace "$CIFS_TEST_MNT"
+W=$CIFS_TEST_WORK
+for i in $(seq 1 5); do echo "f$i" > "$W/f$i" || _fail "create file failed"; done
 
 # Snapshot open_dirs baseline AFTER nohandlecache mount (stale entries may exist)
 nohandle_baseline=0
@@ -123,24 +107,22 @@ fi
 
 # Trigger readdir multiple times
 for i in $(seq 1 10); do
-    ls "$W" >/dev/null 2>&1
+    _readdir_232
 done
 sleep 1
 
 nohandle_dirs=0
 if $have_open_dirs; then
     nohandle_dirs_raw=$(_open_dirs_count "cifs232")
-    # Subtract baseline to ignore stale entries from tcon reuse
-    nohandle_dirs=$((nohandle_dirs_raw - nohandle_baseline))
-    [ "$nohandle_dirs" -lt 0 ] && nohandle_dirs=0
+    nohandle_dirs=$nohandle_dirs_raw
     echo "phase2 (nohandlecache): open_dirs entries=$nohandle_dirs_raw baseline=$nohandle_baseline delta=$nohandle_dirs" >> $seqres.full
 fi
 
 cr_nohandle=0
 cr2=$(_stats_creates)
-if [ "$cr2" -gt 0 ]; then
-    for i in $(seq 1 5); do ls "$W" >/dev/null 2>&1; done
-    cr3=$(_stats_creates)
+if [ -n "$cr2" ]; then
+    for i in $(seq 1 5); do _readdir_232; done
+    cr3=$(_stats_creates) || _fail "uncached Creates counter disappeared"
     cr_nohandle=$((cr3 - cr2))
     echo "phase2 (nohandlecache): stats creates delta=$cr_nohandle" >> $seqres.full
 fi
@@ -163,7 +145,7 @@ if $have_open_dirs; then
 fi
 
 # Method 2: Stats Creates fallback
-if ! $validated && [ "$cr0" -gt 0 ]; then
+if ! $validated && [ -n "$cr0" ] && [ -n "$cr2" ]; then
     if [ "$cr_nohandle" -gt "$cr_cached" ]; then
         echo "nohandlecache: Stats confirms more Creates without caching (nohandle=$cr_nohandle cached=$cr_cached)" >> $seqres.full
         validated=true
@@ -173,7 +155,7 @@ if ! $validated && [ "$cr0" -gt 0 ]; then
 fi
 
 if ! $validated; then
-    _notrun "could not validate nohandlecache (open_dirs empty + Stats unavailable; server may not support dir caching)"
+    _notrun "normal mount showed no directory handle reuse (cached Creates=$cr_cached, nohandlecache Creates=$cr_nohandle)"
 fi
 
 echo "nohandlecache functional OK"

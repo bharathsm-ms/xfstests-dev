@@ -18,6 +18,7 @@
 . ./common/preamble
 . ./common/rc
 _begin_fstest auto quick
+. ./common/cifs_debug
 
 [ "$FSTYP" = "cifs" ] || _notrun "requires CIFS"
 [ -n "$TEST_DEV" ] || _notrun "TEST_DEV not set"
@@ -34,89 +35,28 @@ UNCP=$(_unc_posix "$TEST_DEV")
 SHARE=$(_share_from_unc "$TEST_DEV")
 [ -n "$HOST" ] || _notrun "could not derive host"
 
-_dd_effective_channels_for_share()
-{
-    local host="$1" share="$2"; local snap
-    snap=$(cat /proc/fs/cifs/DebugData 2>/dev/null)
-    echo "$snap" >> $seqres.full
-    echo "$snap" | awk -v HOST="$host" -v SHARE="$share" '
-        function finish_block() {
-            if (in_block==1 && target==1) {
-                eff=sum
-                if (extra > 0 && eff < extra + 1)
-                    eff=extra + 1
-                printf "%d\n", eff
-            }
-        }
-        BEGIN {
-            tl=tolower(HOST); sl=tolower(SHARE)
-            in_block=0; target=0; in_if=0; sum=0; extra=0
-        }
-        /^[[:space:]]*[0-9]+[)].*ConnectionId:/ {
-            finish_block()
-            in_block=1; target=0; in_if=0; sum=0; extra=0; next
-        }
-        in_block==1 {
-            line=tolower($0)
-            if (index(line, "\\\\" tl "\\" sl " ")>0 || line ~ ("\\\\" tl "\\" sl "$"))
-                target=1
-            if ($1=="Extra" && $2=="Channels:") { extra=$3+0 }
-            if ($1=="Server" && $2=="interfaces:") { in_if=1; next }
-            if (in_if==1 && $1=="Allocated" && $2=="channels:") { n=$3+0; sum+=n }
-        }
-        END { finish_block() }
-    '
-}
-
-_resolve_host_ips() { getent ahosts "$1" | awk '{print $1}' | sort -u; }
-
-_tcp_conns_to_host_count()
-{
-    local host="$1" ips ip
-    ips=$(_resolve_host_ips "$host")
-    [ -n "$ips" ] || { echo 0; return; }
-    if command -v ss >/dev/null 2>&1; then
-        ss -tanH 2>/dev/null | awk -v IPS="$(echo $ips)" '
-            BEGIN { split(IPS,a," "); }
-            { r=$5; if (r ~ /:445$/ || r ~ /:139$/) { for (i in a) if (index(r,a[i])>0) { c++; break } } }
-            END { print c+0 }
-        '
-    else
-        netstat -tan 2>/dev/null | sed '1,2d' | awk -v IPS="$(echo $ips)" '
-            BEGIN { split(IPS,a," "); }
-            { r=$5; if (r ~ /:445$/ || r ~ /:139$/) { for (i in a) if (index(r,a[i])>0) { c++; break } } }
-            END { print c+0 }
-        '
-    fi
-}
-
-_register_cleanup "_test_unmount >/dev/null 2>&1; rm -f \"$TEST_DIR/.cifs106.$$\" >/dev/null 2>&1"
+command -v ss >/dev/null 2>&1 || _notrun "ss required"
+[ -r /proc/fs/cifs/DebugData ] || _notrun "DebugData unavailable"
+. ./common/cifs_test
+_cifs_test_init
 
 # Ensure we explicitly request multichannel
-_test_unmount > /dev/null 2>&1
-_do "_test_mount -o multichannel" || _fail "mount TEST_DEV with multichannel failed"
+_cifs_test_mount_connection 'vers=3.1.1,multichannel,max_channels=2'
+_cifs_test_workspace "$CIFS_TEST_MNT"
 
 # Light I/O to activate the connection
-echo 1 > "$TEST_DIR/.cifs106.$$" 2>/dev/null || true
+echo 1 > "$CIFS_TEST_WORK/data" || _fail "create test file failed"
+[ "$(cat "$CIFS_TEST_WORK/data")" = 1 ] || _fail "activation data mismatch"
 
 # Poll for DebugData channels (require >=2)
-tries=30
-sum=""
-while [ $tries -gt 0 ]; do
-    sum=$(_dd_effective_channels_for_share "$HOST" "$SHARE" | awk 'BEGIN{m=""} {if (m=="" || $1+0>m) m=$1+0} END{if(m!="") print m}')
-    echo "multichannel: DebugData sum='${sum}' tries=$tries" >> $seqres.full
-    [ -n "$sum" ] && [ "$sum" -ge 2 ] && break
-    tries=$((tries-1)); sleep 0.2
-done
-
-[ -n "$sum" ] || _fail "DebugData not available for $UNCW"
-[ "$sum" -ge 2 ] || _fail "DebugData shows <2 allocated channels (sum=$sum) after requesting multichannel"
+_cifs_wait_multichannel "$TEST_DEV" 2 "$CIFS_TEST_CONNECTION"
+sum=$CIFS_CHANNELS
 
 # Also require multiple TCP sockets to the server
 tries=20
 sc=0
 while [ $tries -gt 0 ]; do
-    sc=$(_tcp_conns_to_host_count "$HOST")
+    sc=$(_cifs_tcp_connections "$HOST" "$CIFS_INTERFACE_IPS")
     echo "sockets: count=$sc (tries=$tries)" >> $seqres.full
     [ "$sc" -ge 2 ] && break
     tries=$((tries-1)); sleep 0.3
