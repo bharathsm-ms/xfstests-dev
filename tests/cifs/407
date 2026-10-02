@@ -1,0 +1,41 @@
+#!/bin/bash
+
+. ./common/preamble
+. ./common/rc
+. ./common/cifs_test
+
+_begin_fstest auto quick
+
+_cifs_test_init
+_require_test_program cifs_compression
+_cifs_test_mount 'vers=3.1.1,serverino,cache=none,actimeo=0,closetimeo=0'
+_cifs_test_mount_option serverino
+_cifs_test_workspace "$CIFS_TEST_MNT"
+timeout --kill-after=5s 30 "$here/src/cifs_compression" "$CIFS_TEST_WORK/probe" probe \
+	>> "$seqres.full" 2>&1
+result=$?
+if [ "$result" -eq 77 ]; then
+	timeout --kill-after=5s 30 "$here/src/cifs_compression" "$CIFS_TEST_WORK/probe-writable" probe-writable \
+		>> "$seqres.full" 2>&1
+	result=$?
+	[ "$result" -ne 77 ] || _notrun "server does not support file-compression ioctls"
+	_fail "read-only fallback unsupported; writable compression probe returned $result"
+fi
+[ "$result" -eq 0 ] || _fail "read-only compression fallback failed"
+for mode in writable borrowed unlinked; do
+	timeout --kill-after=5s 30 "$here/src/cifs_compression" "$CIFS_TEST_WORK/$mode" "$mode" \
+		>> "$seqres.full" 2>&1 || _fail "$mode compression ioctl failed"
+done
+
+_cifs_test_mount 'vers=3.1.1,noserverino,cache=none,actimeo=0,closetimeo=0'
+mount_options=$(findmnt -rn -M "$CIFS_TEST_MNT" -o OPTIONS) ||
+	_fail "read compression mount options"
+[[ ",$mount_options," != *,serverino,* ]] ||
+	_fail "serverino is active on the noserverino mount"
+_cifs_test_workspace "$CIFS_TEST_MNT"
+timeout --kill-after=5s 30 "$here/src/cifs_compression" "$CIFS_TEST_WORK/noserverino" noserverino \
+	>> "$seqres.full" 2>&1 || _fail "compression fallback without serverino returned the wrong error"
+
+echo "Silence is golden"
+status=0
+exit
