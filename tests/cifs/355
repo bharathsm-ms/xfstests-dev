@@ -1,0 +1,85 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-2.0
+#
+# CIFS: readdir cache — emit_cached_dirents, add_cached_dirent paths
+#
+# Exercises: emit_cached_dirents, add_cached_dirent, cifs_dir_info_to_fattr
+
+. ./common/preamble
+. ./common/rc
+
+_begin_fstest auto quick
+
+[ "$FSTYP" = "cifs" ] || _notrun "requires CIFS"
+[ "$(id -u)" = 0 ] || _notrun "root required"
+[ -n "$TEST_DIR" ] || _notrun "TEST_DIR not set"
+
+. ./common/cifs_test
+. ./common/cifs_debug
+_cifs_test_init
+command -v python3 >/dev/null || _notrun "python3 required"
+_cifs_require_directory_leasing "$TEST_DEV"
+_cifs_test_mount 'vers=3.1.1,cache=strict,closetimeo=0'
+_cifs_test_workspace "$CIFS_TEST_MNT"
+SUB=$CIFS_TEST_WORK
+
+# Create 50 files
+for number in $(seq 1 50); do
+    name=$(printf 'file_%03d' "$number")
+    echo "$number" > "$SUB/$name" || _fail "create fixture file"
+    echo "$name" >> "$tmp.expected"
+done
+
+# ── Test 1: first readdir populates cache ─────────────────────
+echo "test1: first readdir" >> "$seqres.full"
+before=$(_cifs_stat "$TEST_DEV" QueryDirectories:) || _notrun "directory query counter unavailable"
+ls -1 "$SUB/" > "$tmp.ls1" 2>>"$seqres.full" || _fail "initial enumeration failed"
+cmp "$tmp.expected" "$tmp.ls1" || _fail "initial directory contents mismatch"
+first=$(_cifs_stat "$TEST_DEV" QueryDirectories:) || _fail "read initial query counter"
+[ "$first" -gt "$before" ] || _fail "initial enumeration issued no directory query"
+count1=$(wc -l < "$tmp.ls1")
+echo "test1: $count1 entries" >> "$seqres.full"
+
+# ── Test 2: second readdir should use cache ───────────────────
+echo "test2: cached readdir" >> "$seqres.full"
+ls -1 "$SUB/" > "$tmp.ls2" 2>>"$seqres.full" || _fail "cached enumeration failed"
+cmp "$tmp.expected" "$tmp.ls2" || _fail "cached directory contents mismatch"
+second=$(_cifs_stat "$TEST_DEV" QueryDirectories:) || _fail "read cached query counter"
+[ "$second" -eq "$first" ] || _notrun "server did not grant reusable directory enumeration cache"
+count2=$(wc -l < "$tmp.ls2")
+echo "test2: $count2 entries" >> "$seqres.full"
+
+# ── Test 3: readdir with stat (exercises fattr path) ──────────
+echo "test3: readdir+stat" >> "$seqres.full"
+ls -la "$SUB/" > /dev/null 2>>"$seqres.full" || _fail "readdir/stat failed"
+stat "$SUB/file_001" > /dev/null 2>>"$seqres.full" || _fail "file stat failed"
+
+# ── Test 4: readdir after modifying dir (cache invalidation) ──
+echo "test4: readdir after modify" >> "$seqres.full"
+echo "new" > "$SUB/file_new_051" || _fail "create new entry failed"
+echo file_new_051 >> "$tmp.expected"
+ls -1 "$SUB/" > "$tmp.ls3" 2>>"$seqres.full" || _fail "modified enumeration failed"
+cmp "$tmp.expected" "$tmp.ls3" || _fail "modified directory contents mismatch"
+[ "$(cat "$SUB/file_new_051")" = new ] || _fail "new entry contents mismatch"
+count3=$(wc -l < "$tmp.ls3")
+echo "test4: $count3 entries (should be 51)" >> "$seqres.full"
+
+# ── Test 5: opendir + read partial + close ────────────────────
+echo "test5: partial readdir" >> "$seqres.full"
+python3 - "$SUB" >> "$seqres.full" 2>&1 <<'PY'
+import os, sys
+entries = []
+with os.scandir(sys.argv[1]) as iterator:
+    for index, entry in enumerate(iterator):
+        entries.append(entry.name)
+        if index >= 9:
+            break
+assert len(set(entries)) == 10
+assert all(name.startswith('file_') for name in entries)
+print(f'partial readdir: {len(entries)} entries read')
+PY
+[ "$?" -eq 0 ] || _fail "partial enumeration failed"
+
+echo "readdir cache coverage OK"
+status=0
+exit
