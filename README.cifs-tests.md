@@ -2,11 +2,42 @@
 
 This document describes the CIFS/SMB client test suite for xfstests.
 
-**Total: 211 tests (cifs/001–312)** covering:
+**Working-tree inventory on 2026-10-06: 305 numbered tests**, including
+290 committed scripts and 15 untracked additions. IDs are sparse, through
+`cifs/407`; a committed checkout does not contain every local addition.
+
+## Commit status (2026-10-06)
+
+The following **19 test changes were reviewed as good to commit and committed
+locally in `028c3dc6`**. That commit has not been pushed. Each selected script
+and expected output matches an archived passing Samba attempt; this is not
+an all-server compatibility claim.
+
+| Status | Count | Test IDs (`cifs/` prefix omitted) |
+| --- | ---: | --- |
+| Committed repairs | 5 | 149, 158, 203, 215, 244 |
+| Committed additions | 14 | 323, 324, 326, 327, 328, 329, 330, 331, 333, 356, 379, 387, 404, 406 |
+| Good to commit, still pending | 0 | None of the remaining reviewed changes is currently cleared. |
+| Held repairs to already committed tests | 5 | 192, 194, 225, 236, 275 |
+| Held untracked additions | 15 | 318, 325, 343, 345, 349, 360, 377, 378, 385, 391, 395, 397, 401, 402, 405 |
+
+The 20 held changes need further fixes, fixture validation, failure attribution
+or duplicate-test consolidation. A committed test can still have an uncommitted
+repair on hold; committed status alone does not certify the current working
+copy. Previously committed tests are not newly approved by this list.
+
+See [the commit selection and cross-server results](cifs-results-20261006.md)
+for per-test behavior, hold reasons, fixture requirements and source-version
+limits. The complete runnable inventory remains in
+[tests/cifs/group.list](tests/cifs/group.list); its working-tree version also
+includes the held local additions. Historical checksummed attempt lists under
+`coverage/` remain unchanged and record executions, not commit readiness.
+
+The suite covers:
 - POSIX I/O semantics, permissions, ACLs, xattr, locking
 - 45+ mount options, module parameters, remount transitions
 - Reconnect/resilience, lease/oplock handling, credit management
-- All userspace-accessible IOCTLs and FSCTLs
+- Selected userspace-accessible IOCTLs and FSCTLs
 - SMB3 encryption, compression, multichannel, deferred close
 - Data corruption corner cases and 10+ bug regression tests
 - Performance benchmarks (dir leases, caching, copy_file_range, deferred close)
@@ -379,3 +410,31 @@ Pass/fail interpretation must be **capability-based**:
 - **310**: Multi-mount consistency — 10 nosharesock mounts × 10 parallel processes: shared file writes at unique offsets, shared directory creates, cross-mount read verification, lease break confirmation, handle leak check.
 - **311**: Deferred close overflow — 3 rounds × 5000 rapid open/close with closetimeo=30, verify no resource exhaustion, data integrity, handle leaks, dmesg warnings.
 - **312**: Rapid mount/unmount stress — 100 parallel processes each mount/write/unmount + 50 sequential cycles, session/tcon leak detection, handle leak check.
+
+### cifs/313-407 (additional reviewed tests)
+
+This range contains both committed tests and held local additions. See the
+commit-status list above for the selected and held IDs, and the
+[dated result page](cifs-results-20261006.md) for outcomes and validation limits.
+The index below is a feature map, not a pass or commit-readiness claim.
+
+| IDs | Coverage |
+| --- | --- |
+| 313-322, 396 | DFS traversal, referrals, cache lifecycle, TTL, read-only behavior, and reconnect/remount checks. |
+| 323-333, 404 | Private Kerberos authentication, signing/encryption, ticket removal, multiuser, reconnect, DFS, and credential-UID selection. |
+| 334, 337-340, 361-362, 381 | CIFS proc controls, restoration, counters, and checked I/O. |
+| 335, 360, 380, 395 | SID interpretation, cifsacl mode round trips, and semantic DACL copying. |
+| 336, 342, 371, 386, 399 | Negotiation and ioctl ABI, error handling, and bounded key-buffer checks. |
+| 341, 344, 346, 348, 350, 357, 363-364, 367-370, 372-376, 388-389, 393, 398, 403 | File and directory operations, data integrity, mount options, and concurrent workloads. |
+| 343, 345, 349, 352, 354-355, 358-359, 384-385, 394 | File locks, leases, directory caching, handle lifecycle, and nocase directory behavior. |
+| 347 | Native CIFS notify ioctl event delivery and cancellation. |
+| 351, 382, 401 | Extended attributes, DOS metadata, and exact negative-operation errors. |
+| 353, 378, 383, 402 | SFU nodes, native/MF symlinks, and NFS reparse nodes. |
+| 356 | Private cifscreds keyring lifecycle and multiuser I/O. |
+| 365-366, 400 | Mount-option, share-name, and credential negative controls with positive controls. |
+| 377, 387, 391, 397 | Explicitly opted-in module reload or Samba restart tests; persistent-handle recovery requires CA support. |
+| 379 | Server snapshot enumeration with validated UTF-16 labels. |
+| 390, 392 | Negotiated SMB3 POSIX semantics and multichannel limits. |
+| 405 | Live multichannel resizing with open-file I/O; held local addition. |
+| 406 | Verified decryption offload and negative controls using private tracing; committed in 028c3dc6. |
+| 407 | Server filesystem compression behavior, not SMB wire compression; previously committed. |
