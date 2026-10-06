@@ -1,0 +1,58 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-2.0
+#
+# CIFS: cruid= mount option — Kerberos credential-cache uid selection
+#
+# Behavior under test
+# - cruid= tells the kernel which uid's Kerberos credential cache the
+#   cifs.upcall SPNEGO upcall should consult when setting up the session.
+# - Mount with sec=krb5,cruid=<uid-with-a-ticket> — must succeed and do I/O.
+# - Mount with sec=krb5,cruid=<uid-with-no-ticket> — upcall has no cache to
+#   read, so Kerberos auth should not succeed via that cruid.
+# - Mount with a nonexistent cruid user name must be rejected by the helper.
+# - CIFS_KRB5_EMPTY_UID must be a dedicated existing non-root account with
+#   no tickets; no users or default credential caches are modified.
+#
+# Kernel code exercised
+#   fs_context.c (Opt_cruid parsing → ctx->cred_uid)
+#   cifs_spnego.c / cifs_get_spnego_key (cruid used to locate the ccache)
+#   sess.c (SMB2_sess_setup with Kerberos blob)
+
+. ./common/preamble
+. ./common/rc
+. ./common/cifs_krb5
+
+_begin_fstest auto quick krb5
+
+_cifs_krb5_test_init
+[ "$(id -u)" = 0 ] || _notrun "root required"
+[ -n "$TEST_DEV" ] || _notrun "TEST_DEV not set"
+[[ "${CIFS_KRB5_EMPTY_UID:-}" =~ ^[1-9][0-9]*$ ]] ||
+	_notrun "CIFS_KRB5_EMPTY_UID must identify a dedicated non-root account without tickets"
+[ "$CIFS_KRB5_EMPTY_UID" != "${CIFS_KRB5_UID:-}" ] || _notrun "positive and empty credential UIDs must differ"
+getent passwd "$CIFS_KRB5_EMPTY_UID" >/dev/null || _notrun "empty credential UID does not exist"
+command -v setpriv >/dev/null || _notrun "setpriv required"
+setpriv --reuid="$CIFS_KRB5_EMPTY_UID" --regid="$(id -g "$CIFS_KRB5_EMPTY_UID")" \
+	--clear-groups env -u KRB5CCNAME klist -s
+[ "$?" -eq 1 ] || _notrun "empty credential UID has tickets or its cache cannot be checked"
+
+_cifs_krb5_kinit || _fail "private kinit failed"
+_cifs_krb5_test_mount krb5 cache=none
+_cifs_test_workspace "$KRB_MNT"
+TESTFILE="$CIFS_TEST_WORK/data"
+echo cruid-krb5-data > "$TESTFILE" || _fail "positive cruid write failed"
+[ "$(cat "$TESTFILE")" = cruid-krb5-data ] || _fail "positive cruid read failed"
+_cifs_krb5_verify_session || _fail "positive cruid did not authenticate with Kerberos"
+
+unset KRB5CCNAME
+_cifs_test_mount_rejected "sec=krb5,vers=3.1.1,cruid=$CIFS_KRB5_EMPTY_UID" \
+	"$TEST_DEV" 'mount error\((1|13|126)\)'
+export KRB5CCNAME="FILE:$_cifs_krb5_cache_dir/cache"
+_cifs_test_mount_rejected "sec=krb5,vers=3.1.1,cruid=missing-${CIFS_TEST_WORK##*/}" \
+	"$TEST_DEV" 'bad user|invalid|bad option: cruid=|mount error\(22\)'
+[ "$(cat "$TESTFILE")" = cruid-krb5-data ] || _fail "negative controls disturbed the valid session"
+
+echo "cruid mount option OK"
+
+status=0
+exit

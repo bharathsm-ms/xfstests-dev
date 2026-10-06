@@ -1,0 +1,78 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-2.0
+#
+# CIFS: multiuser Kerberos with private tickets for two local credential UIDs
+#
+# Behavior under test
+# - Mount with sec=krb5,multiuser.
+# - Use CIFS_KRB5_UID and CIFS_KRB5_SECOND_UID, both dedicated non-root users.
+# - Authenticate both UIDs with private caches for the configured principal.
+# - Require checked I/O as both UIDs and distinct Kerberos sessions.
+#
+# Kernel code exercised
+#   cifs_set_cifscreds(), setup_authusers_ACE(), multiuser session handling
+
+. ./common/preamble
+. ./common/rc
+. ./common/cifs_krb5
+
+_begin_fstest auto quick krb5
+
+_cifs_krb5_test_init
+[ "$(id -u)" = 0 ] || _notrun "root required"
+[ -n "$TEST_DEV" ] || _notrun "TEST_DEV not set"
+command -v setpriv >/dev/null || _notrun "setpriv required"
+command -v python3 >/dev/null || _notrun "python3 required"
+[[ "${CIFS_KRB5_SECOND_UID:-}" =~ ^[1-9][0-9]*$ ]] || _notrun "CIFS_KRB5_SECOND_UID required"
+[ "$CIFS_KRB5_SECOND_UID" != "${CIFS_KRB5_UID:-}" ] || _notrun "credential UIDs must differ"
+getent passwd "$CIFS_KRB5_SECOND_UID" >/dev/null || _notrun "secondary credential UID does not exist"
+
+# ── Mount with multiuser + krb5 ──────────────────────────────
+_cifs_krb5_kinit || _fail "kinit failed"
+primary_cache=$KRB5CCNAME
+secondary_dir=$(mktemp -d "$tmp.krb5-secondary.XXXXXXXX") || _fail "create secondary private cache"
+chown "$CIFS_KRB5_SECOND_UID" "$secondary_dir" || _fail "set secondary cache owner"
+secondary_cache="FILE:$secondary_dir/cache"
+if [ -n "${CIFS_KRB5_KEYTAB:-}" ]; then
+	_cifs_krb5_acquire "$secondary_cache" >> "$seqres.full" 2>&1 ||
+		_fail "secondary private keytab kinit failed"
+	chown "$CIFS_KRB5_SECOND_UID" "$secondary_dir/cache" || _fail "set secondary cache owner"
+else
+	printf '%s\n' "$CIFS_KRB5_PASS" | setpriv --reuid="$CIFS_KRB5_SECOND_UID" \
+		--regid="$(id -g "$CIFS_KRB5_SECOND_UID")" --clear-groups timeout --kill-after=5s 20 \
+		kinit -c "$secondary_cache" "$CIFS_KRB5_USER@$CIFS_KRB5_REALM" >> "$seqres.full" 2>&1 ||
+		_fail "secondary private kinit failed"
+fi
+_cifs_krb5_test_mount krb5 cache=none
+_cifs_test_workspace "$KRB_MNT"
+relative=${CIFS_TEST_WORK##*/}
+chmod 0777 "$CIFS_TEST_WORK" || _fail "set owned workspace permissions"
+
+echo "mount multiuser krb5" >> "$seqres.full"
+_cifs_krb5_test_mount krb5 "multiuser,uid=$CIFS_KRB5_UID,cache=none"
+for credential_uid in "$CIFS_KRB5_UID" "$CIFS_KRB5_SECOND_UID"; do
+	cache=$primary_cache
+	[ "$credential_uid" != "$CIFS_KRB5_SECOND_UID" ] || cache=$secondary_cache
+	setpriv --reuid="$credential_uid" --regid="$(id -g "$credential_uid")" --clear-groups \
+		env KRB5CCNAME="$cache" timeout --kill-after=5s 30 python3 - \
+		"$KRB_MNT/$relative/uid-$credential_uid" "$credential_uid" >> "$seqres.full" 2>&1 <<'PY'
+import os, sys
+expected = ('private-krb5-uid-' + sys.argv[2]).encode()
+descriptor = os.open(sys.argv[1], os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o600)
+try:
+    assert os.write(descriptor, expected) == len(expected)
+    os.fsync(descriptor)
+    assert os.pread(descriptor, len(expected) + 1, 0) == expected
+finally:
+    os.close(descriptor)
+PY
+	[ "$?" -eq 0 ] || _fail "multiuser I/O failed for UID $credential_uid"
+done
+_cifs_krb5_verify_session || _fail "multiuser session did not authenticate with Kerberos"
+sessions=$(_cifs_debug_share "$TEST_DEV" | awk -v connection="$_cifs_krb5_connection" '$1 == connection {print $2}' | sort -u | wc -l)
+[ "$sessions" -ge 2 ] || _fail "multiuser mount did not create distinct credential sessions"
+
+echo "multiuser Kerberos OK"
+
+status=0
+exit

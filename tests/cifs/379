@@ -1,0 +1,65 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-2.0
+# CIFS: Snapshot enumeration via IOCTL_SRV_ENUMERATE_SNAPSHOTS
+#
+# Kernel code exercised
+#   smb2ops.c  (smb3_enum_snapshots)
+#   ioctl.c    (cifs_ioctl — CIFS_IOC_ENUMERATE_SNAPSHOTS path)
+
+. ./common/preamble
+. ./common/rc
+
+_begin_fstest auto quick
+
+[ "$FSTYP" = "cifs" ] || _notrun "requires CIFS"
+[ "$(id -u)" = 0 ] || _notrun "root required"
+[ -n "$CIFS_CRED_FILE" ] || _notrun "CIFS_CRED_FILE not set"
+
+. ./common/cifs_test
+_cifs_test_init
+command -v python3 >/dev/null || _notrun "python3 required"
+_cifs_test_mount 'vers=3.1.1' "${CIFS_SNAPSHOT_DEV:-$TEST_DEV}"
+_cifs_test_workspace "$CIFS_TEST_MNT"
+echo snapshot_data > "$CIFS_TEST_WORK/data" || _fail "snapshot fixture write failed"
+python3 - "$CIFS_TEST_WORK/data" >> "$seqres.full" 2>&1 <<'PY'
+import datetime, errno, fcntl, os, struct, sys
+descriptor = os.open(sys.argv[1], os.O_RDONLY)
+try:
+    header = bytearray(12)
+    try:
+        fcntl.ioctl(descriptor, 0x800ccf06, header)
+    except OSError as error:
+        if error.errno == errno.EOPNOTSUPP:
+            sys.exit(77)
+        raise
+    count, returned, size = struct.unpack('<III', header)
+    assert returned <= count
+    if count == 0:
+        sys.exit(78)
+    assert 50 * count <= size <= 1024 * 1024, 'invalid snapshot array size'
+    buffer = bytearray(12 + size)
+    struct.pack_into('=III', buffer, 0, count, 0, size)
+    fcntl.ioctl(descriptor, 0x800ccf06, buffer)
+    total, returned, actual_size = struct.unpack_from('<III', buffer)
+    assert total == count and returned == count and actual_size <= size
+    labels = []
+    for number in range(returned):
+        token = bytes(buffer[12 + number * 50:12 + (number + 1) * 50])
+        assert token[-2:] == b'\0\0'
+        label = token[:-2].decode('utf-16-le')
+        datetime.datetime.strptime(label, '@GMT-%Y.%m.%d-%H.%M.%S')
+        labels.append(label)
+    assert len(set(labels)) == count
+    assert os.read(descriptor, 100) == b'snapshot_data\n'
+    print(f'Validated {count} snapshot labels')
+finally:
+    os.close(descriptor)
+PY
+result=$?
+[ "$result" -ne 77 ] || _notrun "server does not support snapshot enumeration"
+[ "$result" -ne 78 ] || _notrun "snapshot-enabled share with existing snapshots required"
+[ "$result" -eq 0 ] || _fail "snapshot enumeration failed"
+
+echo "Silence is golden"
+status=0
+exit

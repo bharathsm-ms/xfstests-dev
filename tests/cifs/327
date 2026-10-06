@@ -1,0 +1,71 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-2.0
+#
+# CIFS: Concurrent krb5 + NTLMSSP sessions to same server
+#
+# Behavior under test
+# - Mount once with sec=krb5 (Kerberos auth).
+# - Mount again with sec=ntlmssp (password auth) to same server.
+# - Verify both mounts work independently.
+# - Verify DebugData shows two sessions with different security types.
+#
+# Kernel code exercised
+#   sess.c (multi-session to same server, mixed auth)
+#   connect.c (session multiplexing)
+
+. ./common/preamble
+. ./common/rc
+. ./common/cifs_krb5
+
+_begin_fstest auto quick krb5
+
+_cifs_krb5_test_init
+[ "$(id -u)" = 0 ] || _notrun "root required"
+[ -n "$TEST_DEV" ] || _notrun "TEST_DEV not set"
+[ -n "$CIFS_CRED_FILE" ] || _notrun "CIFS_CRED_FILE not set"
+
+# ── Mount 1: Kerberos ─────────────────────────────────────────
+_cifs_krb5_kinit || _fail "kinit failed"
+
+echo "mount1: sec=krb5" >> "$seqres.full"
+_cifs_krb5_test_mount krb5 cache=none
+_cifs_test_workspace "$KRB_MNT"
+krb_work=$CIFS_TEST_WORK
+relative=${krb_work##*/}
+
+echo "krb5-session-data" > "$krb_work/krb" 2>>"$seqres.full" || \
+	_fail "krb5 write failed"
+
+# ── Mount 2: NTLMSSP (password) ──────────────────────────────
+echo "mount2: sec=ntlmssp" >> "$seqres.full"
+_cifs_debug_share "$TEST_DEV" | awk '{print $1}' | sort -u > "$tmp.before-ntlm"
+_cifs_test_mount 'sec=ntlmssp,vers=3.1.1,cache=none'
+NTLM_MNT=$CIFS_TEST_MNT
+_cifs_debug_share "$TEST_DEV" | awk '{print $1}' | sort -u > "$tmp.after-ntlm"
+ntlm_connection=$(comm -13 "$tmp.before-ntlm" "$tmp.after-ntlm")
+[[ "$ntlm_connection" =~ ^(0x[[:xdigit:]]+|[0-9]+)$ ]] || _fail "cannot isolate new NTLMSSP connection"
+[ "$ntlm_connection" != "$_cifs_krb5_connection" ] || _fail "authentication mounts share a connection"
+
+echo "ntlm-session-data" > "$NTLM_MNT/$relative/ntlm" 2>>"$seqres.full" || \
+	_fail "ntlmssp write failed"
+
+# ── Verify both sessions in DebugData ─────────────────────────
+echo "verify sessions" >> "$seqres.full"
+_cifs_krb5_verify_session || _fail "new Kerberos connection has wrong authentication"
+ntlm_security=$(_cifs_debug_share "$TEST_DEV" | awk -v connection="$ntlm_connection" '$1 == connection {print $8}' | sort -u)
+[ "$ntlm_security" = RawNTLMSSP ] || _fail "new NTLMSSP connection has wrong authentication"
+
+# ── Verify both mounts have independent data ──────────────────
+d1=$(cat "$krb_work/krb" 2>>"$seqres.full") || _fail "krb5 read failed"
+d2=$(cat "$NTLM_MNT/$relative/ntlm" 2>>"$seqres.full") || _fail "ntlm read failed"
+
+[ "$d1" = "krb5-session-data" ] || _fail "krb5 data mismatch: '$d1'"
+[ "$d2" = "ntlm-session-data" ] || _fail "ntlm data mismatch: '$d2'"
+
+[ "$(cat "$krb_work/ntlm")" = ntlm-session-data ] || _fail "NTLMSSP data not visible through Kerberos"
+[ "$(cat "$NTLM_MNT/$relative/krb")" = krb5-session-data ] || _fail "Kerberos data not visible through NTLMSSP"
+
+echo "Concurrent krb5 and NTLMSSP sessions OK"
+
+status=0
+exit

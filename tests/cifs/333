@@ -1,0 +1,47 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-2.0
+#
+# CIFS: upcall_target= mount option reporting and Kerberos I/O
+#
+# Behavior under test
+# - Mount with sec=krb5,upcall_target=app — verify option appears in /proc/mounts
+# - Mount with sec=krb5,upcall_target=mount — verify option appears in /proc/mounts
+# - Mount without upcall_target — verify default is used
+# - Verify no crash with invalid upcall_target value
+#
+# Kernel code exercised
+#   fs_context.c (upcall_target option parsing), cifs_upcall_target
+
+. ./common/preamble
+. ./common/rc
+. ./common/cifs_krb5
+
+_begin_fstest auto quick krb5
+
+_cifs_krb5_test_init
+[ "$(id -u)" = 0 ] || _notrun "root required"
+[ -n "$TEST_DEV" ] || _notrun "TEST_DEV not set"
+
+_cifs_krb5_kinit || _fail "kinit failed"
+for target in app mount default; do
+	extra="upcall_target=$target"
+	expected=$target
+	if [ "$target" = default ]; then
+		extra=
+		expected=app
+	fi
+	_cifs_krb5_test_mount krb5 "$extra"
+	_cifs_test_workspace "$KRB_MNT"
+	awk -v target="$KRB_MNT" -v expected="upcall_target=$expected" \
+		'$2 == target {split($4, options, ","); for (option in options) if (options[option] == expected) found=1} END {exit !found}' \
+		/proc/self/mounts || _fail "incorrect upcall_target reporting"
+	echo "upcall-$target" > "$CIFS_TEST_WORK/data" || _fail "upcall routing write failed"
+	[ "$(cat "$CIFS_TEST_WORK/data")" = "upcall-$target" ] || _fail "upcall routing data mismatch"
+done
+_cifs_test_mount_rejected "sec=krb5,vers=3.1.1,cruid=$CIFS_KRB5_UID,upcall_target=bogus" \
+	"$TEST_DEV" 'mount error\(22\)|bad upcall|invalid'
+
+echo "upcall_target mount option OK"
+
+status=0
+exit

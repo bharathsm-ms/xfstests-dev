@@ -1,0 +1,76 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-2.0
+# CIFS: Reconnect and resilience — exercise reconnect code paths
+#
+# Kernel code exercised
+#   connect.c   (cifs_signal_cifsd_for_reconnect, cifs_reconnect,
+#                reconnect_target_locked, __reconnect_target_locked)
+#   smb2misc.c  (smb2_is_valid_lease_break, smb2_is_valid_oplock_break)
+#   transport.c (cifs_reconnect_tcon)
+
+. ./common/preamble
+. ./common/rc
+
+_begin_fstest auto quick
+
+[ "$FSTYP" = "cifs" ] || _notrun "requires CIFS"
+[ "$(id -u)" = 0 ] || _notrun "root required"
+[ -n "$TEST_DEV" ] || _notrun "TEST_DEV not set"
+[ -n "$CIFS_CRED_FILE" ] || _notrun "CIFS_CRED_FILE not set"
+
+. ./common/cifs_test
+_cifs_test_init
+_cifs_test_require_samba_restart
+
+# Mount with soft + short echo_interval to make reconnect fast
+_cifs_test_mount 'vers=3.1.1,soft,cache=none,echo_interval=1'
+MNT=$CIFS_TEST_MNT
+
+_cifs_test_workspace "$MNT"
+TDIR=$CIFS_TEST_WORK
+
+# Test 1: Normal I/O to establish session
+echo "before_reconnect" > "$TDIR/file1" || _fail "write before restart"
+[ "$(cat "$TDIR/file1")" = before_reconnect ] || _fail "read before restart"
+echo "pre-reconnect I/O OK" >> "$seqres.full"
+
+# Test 3: Create multiple files, then force a server restart
+# This exercises the session setup re-establishment
+for i in $(seq 1 5); do
+        echo "data_$i" > "$TDIR/open_file_$i" || _fail "seed file $i"
+done
+
+# Read them back
+for i in $(seq 1 5); do
+        [ "$(cat "$TDIR/open_file_$i")" = "data_$i" ] || _fail "read seed file $i"
+done
+
+# Test 4: Restart Samba briefly to trigger reconnect
+echo "=== restarting smbd ===" >> "$seqres.full"
+_cifs_test_restart_samba
+
+# Wait for server to come back
+sleep 3
+
+# Try I/O — should exercise reconnect paths
+echo "after_reconnect" > "$TDIR/file_after" || _fail "post-restart write"
+[ "$(cat "$TDIR/file_after")" = after_reconnect ] || _fail "post-restart data mismatch"
+
+# Verify old files survived
+[ "$(cat "$TDIR/file1")" = before_reconnect ] || _fail "old data changed across restart"
+for i in $(seq 1 5); do
+        [ "$(cat "$TDIR/open_file_$i")" = "data_$i" ] || _fail "seed file $i changed across restart"
+done
+
+# Test 5: Rapid I/O after reconnect
+for i in $(seq 1 10); do
+        echo "rapid_$i" > "$TDIR/rapid_$i" || _fail "rapid write $i"
+        [ "$(cat "$TDIR/rapid_$i")" = "rapid_$i" ] || _fail "rapid read $i"
+done
+
+# Cleanup
+rm -rf "$TDIR"
+
+echo "Silence is golden"
+status=0
+exit

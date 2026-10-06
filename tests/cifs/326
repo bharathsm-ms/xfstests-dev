@@ -1,0 +1,60 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-2.0
+#
+# CIFS: Private Kerberos ticket removal during an established session
+#
+# Behavior under test
+# - Mount with sec=krb5, verify I/O works.
+# - Destroy the Kerberos ticket (kdestroy).
+# - Attempt I/O — should still work (session key is cached in kernel).
+# - Verify only the private cache is removed, without assuming cached
+#   SPNEGO keys expire at the same time as the userspace ticket file.
+#
+# Kernel code exercised
+#   sess.c (session key re-use), cifs_spnego.c (upcall failure path)
+
+. ./common/preamble
+. ./common/rc
+. ./common/cifs_krb5
+
+_begin_fstest auto quick krb5
+
+_cifs_krb5_test_init
+[ "$(id -u)" = 0 ] || _notrun "root required"
+[ -n "$TEST_DEV" ] || _notrun "TEST_DEV not set"
+
+# ── Phase 1: mount with valid ticket ─────────────────────────
+_cifs_krb5_kinit || _fail "kinit failed"
+
+echo "phase1: mount with ticket" >> "$seqres.full"
+_cifs_krb5_test_mount krb5 cache=none
+_cifs_test_workspace "$KRB_MNT"
+
+TESTFILE="$CIFS_TEST_WORK/data"
+echo "before-kdestroy" > "$TESTFILE" 2>>"$seqres.full" || \
+	_fail "write before kdestroy failed"
+
+# ── Phase 2: destroy ticket, I/O should still work ───────────
+echo "phase2: kdestroy, then I/O" >> "$seqres.full"
+private_cache=${KRB5CCNAME#FILE:}
+[ -f "$private_cache" ] || _fail "private credential cache missing before removal"
+_cifs_krb5_kdestroy || _fail "remove private credential cache"
+[ ! -e "$private_cache" ] || _fail "private credential cache survived removal"
+
+# Existing mount should still work — kernel has the session key
+data=$(cat "$TESTFILE" 2>>"$seqres.full") || _fail "existing session read failed after ticket removal"
+echo "phase2: read after kdestroy: '$data'" >> "$seqres.full"
+
+[ "$data" = "before-kdestroy" ] || _fail "existing session returned incorrect data"
+
+# Write should also work on existing mount
+echo "after-kdestroy" >> "$TESTFILE" 2>>"$seqres.full" || \
+	_fail "existing session write failed after ticket removal"
+printf 'before-kdestroy\nafter-kdestroy\n' > "$tmp.expected"
+cmp "$tmp.expected" "$TESTFILE" || _fail "data mismatch after private ticket removal"
+_cifs_krb5_verify_session || _fail "existing session authentication changed"
+
+echo "Kerberos ticket removal handling OK"
+
+status=0
+exit

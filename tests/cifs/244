@@ -20,45 +20,50 @@ _begin_fstest auto quick
 [ -n "$TEST_DIR" ] || _notrun "TEST_DIR not set"
 
 command -v python3 >/dev/null 2>&1 || _notrun "requires python3"
+[ "$(cat /proc/sys/fs/leases-enable 2>/dev/null)" = 1 ] ||
+    _notrun "Linux file leases disabled (fs.leases-enable)"
 
-W="$TEST_DIR/cifs244.$$"
-_register_cleanup "rm -rf '$W' >/dev/null 2>&1 || true"
-mkdir -p "$W" || _fail "mkdir workspace failed"
+. ./common/cifs_test
+_cifs_test_init
+_cifs_test_workspace
+W=$CIFS_TEST_WORK
 
 echo "lease_test_data" > "$W/leasefile" || _fail "create leasefile failed"
 
 # --- Test 1: F_SETLEASE F_RDLCK and F_UNLCK ---
-python3 -c "
+python3 - "$W/leasefile" 2>>"$seqres.full" <<'PY'
 import fcntl, os, sys, signal, errno
 
 F_RDLCK = fcntl.F_RDLCK
 F_WRLCK = fcntl.F_WRLCK
 F_UNLCK = fcntl.F_UNLCK
 
-fd = os.open('$W/leasefile', os.O_RDONLY)
+fd = os.open(sys.argv[1], os.O_RDONLY)
 try:
     # Try to set a read lease
     try:
         fcntl.fcntl(fd, fcntl.F_SETLEASE, F_RDLCK)
         print('F_SETLEASE F_RDLCK succeeded', file=sys.stderr)
     except OSError as e:
-        if e.errno in (errno.EINVAL, errno.EAGAIN, errno.EACCES):
+        if e.errno in (errno.EINVAL, errno.EOPNOTSUPP):
             print(f'F_SETLEASE not supported: {e}', file=sys.stderr)
             sys.exit(77)  # skip
         raise
 
     # Verify lease is held
     lease_type = fcntl.fcntl(fd, fcntl.F_GETLEASE)
+    assert lease_type == F_RDLCK, 'read lease not held'
     print(f'F_GETLEASE: {lease_type} (F_RDLCK={F_RDLCK})', file=sys.stderr)
 
     # Release lease
     fcntl.fcntl(fd, fcntl.F_SETLEASE, F_UNLCK)
     lease_after = fcntl.fcntl(fd, fcntl.F_GETLEASE)
+    assert lease_after == F_UNLCK, 'read lease not released'
     print(f'After F_UNLCK: F_GETLEASE={lease_after}', file=sys.stderr)
 
 finally:
     os.close(fd)
-" 2>>"$seqres.full"
+PY
 rc=$?
 if [ $rc -eq 77 ]; then
     _notrun "F_SETLEASE not supported on this CIFS mount"
@@ -69,17 +74,19 @@ fi
 echo "cifs244: read lease OK" >> "$seqres.full"
 
 # --- Test 2: F_SETLEASE F_WRLCK + lease break ---
-python3 -c "
-import fcntl, os, sys, signal, errno, time, multiprocessing
+python3 - "$W/leasefile" 2>>"$seqres.full" <<'PY'
+import fcntl, os, sys, signal, errno, time, subprocess
 
 F_WRLCK = fcntl.F_WRLCK
 F_UNLCK = fcntl.F_UNLCK
-lease_broken = multiprocessing.Value('i', 0)
+lease_broken = False
+opener = None
 
 def lease_break_handler(signum, frame):
-    lease_broken.value = 1
+    global lease_broken
+    lease_broken = True
 
-fd = os.open('$W/leasefile', os.O_RDWR)
+fd = os.open(sys.argv[1], os.O_RDWR)
 try:
     # Set SIGIO handler for lease breaks
     old_handler = signal.signal(signal.SIGIO, lease_break_handler)
@@ -91,43 +98,64 @@ try:
         fcntl.fcntl(fd, fcntl.F_SETLEASE, F_WRLCK)
         print('F_SETLEASE F_WRLCK succeeded', file=sys.stderr)
     except OSError as e:
-        if e.errno in (errno.EINVAL, errno.EAGAIN, errno.EACCES):
+        if e.errno in (errno.EINVAL, errno.EOPNOTSUPP):
             print(f'F_SETLEASE WRLCK not supported: {e}', file=sys.stderr)
-            sys.exit(0)  # still pass, write lease may not be supported
+            sys.exit(77)
         raise
 
     lease_type = fcntl.fcntl(fd, fcntl.F_GETLEASE)
+    assert lease_type == F_WRLCK, 'write lease not held'
     print(f'Write lease held: F_GETLEASE={lease_type}', file=sys.stderr)
+
+    opener = subprocess.Popen(
+        [sys.executable, '-c', 'import pathlib,sys; sys.stdout.buffer.write(pathlib.Path(sys.argv[1]).read_bytes())', sys.argv[1]],
+        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    deadline = time.monotonic() + 10
+    while not lease_broken and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert lease_broken, 'competing open did not deliver SIGIO'
+    assert opener.poll() is None, 'competing open bypassed the write lease'
 
     # Release write lease
     fcntl.fcntl(fd, fcntl.F_SETLEASE, F_UNLCK)
+    assert fcntl.fcntl(fd, fcntl.F_GETLEASE) == F_UNLCK
+    output, errors = opener.communicate(timeout=10)
+    assert opener.returncode == 0, errors
+    assert output == b'lease_test_data\n', 'competing open read incorrect data'
     signal.signal(signal.SIGIO, old_handler)
     print('Write lease released', file=sys.stderr)
 
 finally:
+    if opener is not None and opener.poll() is None:
+        opener.kill()
+        opener.wait()
     os.close(fd)
-" 2>>"$seqres.full" || _fail "F_SETLEASE write lease test failed"
+PY
+rc=$?
+if [ $rc -eq 77 ]; then
+    _notrun "F_SETLEASE write lease not supported on this CIFS mount"
+elif [ $rc -ne 0 ]; then
+    _fail "F_SETLEASE write lease test failed"
+fi
 
 echo "cifs244: write lease OK" >> "$seqres.full"
 
 # --- Test 3: verify lease works with different file modes ---
 echo "read_mode_test" > "$W/rdonly_lease" || _fail "create rdonly_lease failed"
 
-python3 -c "
+python3 - "$W/rdonly_lease" 2>>"$seqres.full" <<'PY'
 import fcntl, os, sys, errno
 
-fd = os.open('$W/rdonly_lease', os.O_RDONLY)
+fd = os.open(sys.argv[1], os.O_RDONLY)
 try:
-    try:
-        fcntl.fcntl(fd, fcntl.F_SETLEASE, fcntl.F_RDLCK)
-        lease = fcntl.fcntl(fd, fcntl.F_GETLEASE)
-        print(f'Lease on O_RDONLY fd: {lease}', file=sys.stderr)
-        fcntl.fcntl(fd, fcntl.F_SETLEASE, fcntl.F_UNLCK)
-    except OSError as e:
-        print(f'Lease on O_RDONLY: {e}', file=sys.stderr)
+    fcntl.fcntl(fd, fcntl.F_SETLEASE, fcntl.F_RDLCK)
+    assert fcntl.fcntl(fd, fcntl.F_GETLEASE) == fcntl.F_RDLCK
+    fcntl.fcntl(fd, fcntl.F_SETLEASE, fcntl.F_UNLCK)
+    assert fcntl.fcntl(fd, fcntl.F_GETLEASE) == fcntl.F_UNLCK
 finally:
     os.close(fd)
-" 2>>"$seqres.full" || true
+PY
+[ "$?" -eq 0 ] || _fail "lease on O_RDONLY file mode test failed"
 
 echo "F_SETLEASE OK"
 

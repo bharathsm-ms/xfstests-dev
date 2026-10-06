@@ -4,27 +4,40 @@
 . ./common/preamble
 . ./common/rc
 _begin_fstest auto quick
-[ "$FSTYP" = "cifs" ] || _notrun "requires CIFS"
+. ./common/cifs_test
+_cifs_test_init
 [ -n "$TEST_DEV" ] || _notrun "TEST_DEV not set"
-[ -n "$TEST_DIR" ] || _notrun "TEST_DIR not set"
-[ -n "$CIFS_USER2" ] || _notrun "CIFS_USER2 not set"
-[ -n "$CIFS_PASS2" ] || _notrun "CIFS_PASS2 not set"
-[ "$(id -u)" = 0 ] || _notrun "root mounts needed"
+[ -r "${CIFS_CRED_FILE2:-}" ] || _notrun "CIFS_CRED_FILE2 required for a distinct server account"
+command -v python3 >/dev/null || _notrun "python3 required"
 
-U1=${CIFS_USER:-$USER}
-P1=${CIFS_PASS:-$PASS}
-U2=$CIFS_USER2
-P2=$CIFS_PASS2
+primary_credentials=$CIFS_CRED_FILE
+_cifs_test_mount 'vers=3.1.1,posix,multiuser,sec=ntlmssp,cache=none' "$TEST_DEV" 'SMB3 POSIX modes required'
+_cifs_test_workspace "$CIFS_TEST_MNT"
+primary_work=$CIFS_TEST_WORK
+relative=${primary_work##*/}
+chmod 0711 "$primary_work" || _fail "set traversable private workspace"
+(umask 077; echo secret > "$primary_work/private") || _fail "write private user1 file"
+chmod 0600 "$primary_work/private" || _fail "set private user1 file mode"
+[ "$(stat -c %a "$primary_work/private")" = 600 ] || _fail "user1 file is not private"
+[ "$(cat "$primary_work/private")" = secret ] || _fail "read user1 file"
 
-M1="$TEST_DIR-u1.$$"; M2="$TEST_DIR-u2.$$"
-mkdir -p "$M1" "$M2" || _fail "mkdir"
-_register_cleanup "umount '$M1' >/dev/null 2>&1; umount '$M2' >/dev/null 2>&1; rmdir '$M1' '$M2' >/dev/null 2>&1"
-mount -t cifs -o "multiuser,username=$U1,password=$P1" "$TEST_DEV" "$M1" >>$seqres.full 2>&1 || _notrun "mount user1 failed"
-mount -t cifs -o "multiuser,username=$U2,password=$P2" "$TEST_DEV" "$M2" >>$seqres.full 2>&1 || _notrun "mount user2 failed"
+CIFS_CRED_FILE=$CIFS_CRED_FILE2
+_cifs_test_mount 'vers=3.1.1,posix,multiuser,sec=ntlmssp,cache=none' "$TEST_DEV" 'SMB3 POSIX modes required'
+CIFS_CRED_FILE=$primary_credentials
+_cifs_test_workspace "$CIFS_TEST_MNT"
+echo control > "$CIFS_TEST_WORK/control" || _fail "write user2 control"
+[ "$(cat "$CIFS_TEST_WORK/control")" = control ] || _fail "read user2 control"
+python3 - "$CIFS_TEST_MNT/$relative/private" >> "$seqres.full" 2>&1 <<'PY'
+import errno, pathlib, sys
+try:
+  pathlib.Path(sys.argv[1]).read_bytes()
+except OSError as error:
+  assert error.errno == errno.EACCES, 'unexpected access failure'
+else:
+  raise AssertionError('user2 accessed user1 private file')
+PY
+[ "$?" -eq 0 ] || _fail "user2 private-file isolation failed"
+[ "$(cat "$primary_work/private")" = secret ] || _fail "private data changed"
 
-echo secret > "$M1/priv.$$" || _fail "write u1"
-if cat "$M2/priv.$$" >/dev/null 2>&1; then
-  _fail "user2 accessed user1 file unexpectedly"
-fi
 echo "multiuser isolation OK"
 status=0; exit

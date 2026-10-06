@@ -1,0 +1,123 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-2.0
+#
+# CIFS: cifscreds keyring — set credentials via keyring for multiuser
+#
+# Exercises: cifs_set_cifscreds (connect.c), cifs_select_sectype (sess.c)
+
+. ./common/preamble
+. ./common/rc
+
+_begin_fstest auto quick
+
+[ "$FSTYP" = "cifs" ] || _notrun "requires CIFS"
+[ "$(id -u)" = 0 ] || _notrun "root required"
+[ -n "$TEST_DEV" ] || _notrun "TEST_DEV not set"
+[ -n "$CIFS_CRED_FILE" ] || _notrun "CIFS_CRED_FILE not set"
+[ -r "${CIFS_CRED_FILE2:-}" ] || _notrun "CIFS_CRED_FILE2 required for a distinct server account"
+command -v cifscreds >/dev/null 2>&1 || _notrun "cifscreds not found"
+command -v keyctl >/dev/null 2>&1 || _notrun "keyctl not found"
+
+. ./common/cifs_test
+. ./common/cifs_debug
+_cifs_test_init
+command -v python3 >/dev/null || _notrun "python3 required"
+command -v setpriv >/dev/null || _notrun "setpriv required"
+[[ "${CIFS_MULTIUSER_UID:-}" =~ ^[1-9][0-9]*$ ]] || _notrun "dedicated non-root CIFS_MULTIUSER_UID required"
+account=$(getent passwd "$CIFS_MULTIUSER_UID") || _notrun "CIFS_MULTIUSER_UID must identify an existing dedicated account"
+group=$(printf '%s\n' "$account" | cut -d: -f4)
+setpriv --reuid="$CIFS_MULTIUSER_UID" --regid="$group" --clear-groups keyctl session - true >> "$seqres.full" 2>&1 ||
+		_notrun "dedicated UID cannot create a private session keyring"
+_cifs_debug_share "$TEST_DEV" | awk '{print $1}' | sort -u > "$tmp.before"
+_cifs_test_mount "vers=3.1.1,multiuser,sec=ntlmssp,cache=none,uid=0,gid=$group,file_mode=0660,dir_mode=0770"
+_cifs_test_mount_option multiuser
+_cifs_debug_share "$TEST_DEV" | awk '{print $1}' | sort -u > "$tmp.after"
+connection=$(comm -13 "$tmp.before" "$tmp.after")
+[[ "$connection" =~ ^(0x[[:xdigit:]]+|[0-9]+)$ ]] || _fail "cannot identify multiuser connection"
+_cifs_test_workspace "$CIFS_TEST_MNT"
+chmod 0777 "$CIFS_TEST_WORK" || _fail "allow worker access to owned workspace"
+timeout --kill-after=5s 90 python3 - "$CIFS_CRED_FILE2" "$TEST_DEV" "$CIFS_TEST_WORK" "$CIFS_MULTIUSER_UID" "$group" >> "$seqres.full" 2>&1 <<'PY'
+import configparser, json, socket, subprocess, sys
+from pathlib import Path
+settings = configparser.ConfigParser(interpolation=None)
+settings.read_string('[credentials]\n' + Path(sys.argv[1]).read_text())
+credentials = settings['credentials']
+username = credentials.get('username', credentials.get('user', ''))
+password = credentials.get('password', credentials.get('pass', ''))
+assert username and password and '\n' not in password and '\r' not in password
+username = username.rsplit('\\', 1)[-1]
+host = sys.argv[2].split('/')[2]
+addresses = {entry[4][0] for entry in socket.getaddrinfo(host, 445, socket.AF_INET, socket.SOCK_STREAM)}
+if len(addresses) != 1:
+	sys.exit(77)
+worker = r'''
+import errno, json, os, pty, select, signal, subprocess, sys, termios, time
+from pathlib import Path
+username, password, address, workspace = json.load(sys.stdin)
+def credential_command(action):
+	child, master = pty.fork()
+	if child == 0:
+		os.execvp('cifscreds', ['cifscreds', action, '-u', username, address])
+	completed = False
+	try:
+		deadline = time.monotonic() + 15
+		received = b''
+		sent = False
+		while time.monotonic() < deadline:
+			ready, ignored, errors = select.select([master], [], [], 0.05)
+			if ready:
+				try:
+					data = os.read(master, 4096)
+				except OSError as error:
+					if error.errno != errno.EIO:
+						raise
+					data = b''
+				received = (received + data)[-4096:]
+				if not sent and b'password' in received.lower():
+					assert not termios.tcgetattr(master)[3] & termios.ECHO
+					secret = password.encode() + b'\n'
+					assert os.write(master, secret) == len(secret)
+					sent = True
+			waited, status = os.waitpid(child, os.WNOHANG)
+			if waited:
+				completed = True
+				assert os.waitstatus_to_exitcode(status) == 0, 'cifscreds command failed'
+				assert sent, 'credential command did not request a password'
+				return
+		raise AssertionError('cifscreds prompt timed out')
+	finally:
+		if not completed:
+			os.kill(child, signal.SIGKILL)
+			os.waitpid(child, 0)
+		os.close(master)
+def search():
+	return subprocess.run(['keyctl', 'search', '@s', 'logon', 'cifs:a:' + address], capture_output=True)
+assert search().returncode != 0, 'private session already contains credentials'
+credential_command('add')
+assert search().returncode == 0
+path = Path(workspace) / 'multiuser'
+assert path.write_bytes(b'private-keyring-data') == 20
+assert path.read_bytes() == b'private-keyring-data'
+credential_command('update')
+assert search().returncode == 0
+assert path.write_bytes(b'updated-keyring-data') == 20
+assert path.read_bytes() == b'updated-keyring-data'
+subprocess.run(['cifscreds', 'clear', address], check=True, capture_output=True, timeout=15)
+assert search().returncode != 0, 'clear left credentials in private session'
+'''
+process = subprocess.run(['setpriv', '--reuid=' + sys.argv[4], '--regid=' + sys.argv[5], '--clear-groups',
+						  'keyctl', 'session', '-', sys.executable, '-c', worker],
+						 input=json.dumps([username, password, next(iter(addresses)), sys.argv[3]]),
+						 text=True, capture_output=True, timeout=75)
+assert process.returncode == 0, 'private credential lifecycle or multiuser I/O failed: ' + process.stderr
+PY
+result=$?
+[ "$result" -ne 77 ] || _notrun "single IPv4 address required for cifscreds fixture"
+[ "$result" -eq 0 ] || _fail "private multiuser credential test failed"
+[ "$(cat "$CIFS_TEST_WORK/multiuser")" = updated-keyring-data ] || _fail "multiuser data mismatch"
+sessions=$(_cifs_debug_share "$TEST_DEV" | awk -v target="$connection" '$1 == target {print $2}' | sort -u | wc -l)
+[ "$sessions" -ge 2 ] || _fail "multiuser I/O did not create a separate SMB session"
+
+echo "cifscreds keyring coverage OK"
+status=0
+exit

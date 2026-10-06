@@ -1,0 +1,60 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-2.0
+#
+# CIFS: Kerberos with nolease — sec=krb5 + nolease mount option
+#
+# Behavior under test
+# - Mount with sec=krb5,nolease — disables directory leases.
+# - Verify mount succeeds and I/O works.
+# - Verify DebugData shows Kerberos session.
+# - Verify nolease behavior: each ls should increment QueryDirectories
+#   counter (no lease caching).
+#
+# Kernel code exercised
+#   sess.c (krb5 session), cached_dir.c (nolease path),
+#   smb2misc.c (lease disabled path)
+
+. ./common/preamble
+. ./common/rc
+. ./common/cifs_krb5
+
+_begin_fstest auto quick krb5
+
+_cifs_krb5_test_init
+[ "$(id -u)" = 0 ] || _notrun "root required"
+[ -n "$TEST_DEV" ] || _notrun "TEST_DEV not set"
+
+_cifs_krb5_kinit || _fail "kinit failed"
+
+# ── Mount with krb5 + nolease ─────────────────────────────────
+echo "mount sec=krb5,nolease" >> "$seqres.full"
+_cifs_krb5_test_mount krb5 'nolease,cache=none'
+_cifs_test_workspace "$KRB_MNT"
+awk -v target="$KRB_MNT" '$2 == target {split($4, options, ","); for (option in options) if (options[option] == "nolease") found=1} END {exit !found}' \
+	/proc/self/mounts || _fail "nolease mount option missing"
+
+# ── I/O ───────────────────────────────────────────────────────
+TESTFILE="$CIFS_TEST_WORK/data"
+echo "krb5-nolease-data" > "$TESTFILE" 2>>"$seqres.full" || \
+	_fail "write with krb5+nolease failed"
+data=$(cat "$TESTFILE" 2>>"$seqres.full") || _fail "read failed"
+[ "$data" = "krb5-nolease-data" ] || _fail "data mismatch: '$data'"
+
+# ── Verify Kerberos ───────────────────────────────────────────
+_cifs_krb5_verify_session || _fail "nolease session is not Kerberos"
+
+# ── Verify nolease behavior via Stats ─────────────────────────
+before=$(_cifs_stat "$TEST_DEV" QueryDirectories:) || _notrun "per-share QueryDirectories counter unavailable"
+for iteration in 1 2 3; do
+	listing=$(ls -1 "$CIFS_TEST_WORK") || _fail "directory listing failed"
+	[ "$listing" = data ] || _fail "directory listing mismatch"
+done
+after=$(_cifs_stat "$TEST_DEV" QueryDirectories:) || _fail "read final QueryDirectories counter"
+[ "$((after - before))" -ge 3 ] || _fail "nolease enumerations did not issue directory queries"
+echo "QueryDirectories delta=$((after - before))" >> "$seqres.full"
+
+unlink "$TESTFILE" 2>/dev/null || true
+echo "Kerberos with nolease OK"
+
+status=0
+exit

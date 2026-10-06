@@ -1,0 +1,58 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-2.0
+#
+# CIFS: sec=krb5 mount — basic Kerberos authentication and I/O
+#
+# Behavior under test
+# - Obtain a Kerberos ticket via kinit.
+# - Mount a CIFS share with sec=krb5.
+# - Verify the session type is "Kerberos" in DebugData.
+# - Perform basic file I/O (create, read, verify).
+# - Destroy the ticket and unmount.
+#
+# Kernel code exercised
+#   sess.c (SMB2_sess_setup with Kerberos blob)
+#   cifs_spnego.c (cifs.upcall SPNEGO upcall)
+#   asn1.c (SPNEGO token parsing)
+
+. ./common/preamble
+. ./common/rc
+. ./common/cifs_krb5
+
+_begin_fstest auto quick krb5
+
+_cifs_krb5_test_init
+[ "$(id -u)" = 0 ] || _notrun "root required"
+[ -n "$TEST_DEV" ] || _notrun "TEST_DEV not set"
+
+# ── Get ticket ────────────────────────────────────────────────
+echo "kinit" >> "$seqres.full"
+_cifs_krb5_kinit || _fail "kinit failed"
+klist -c "$KRB5CCNAME" >> "$seqres.full" 2>&1 || _fail "private credential cache unreadable"
+
+# ── Mount with sec=krb5 ──────────────────────────────────────
+echo "mount sec=krb5" >> "$seqres.full"
+_cifs_krb5_test_mount krb5
+_cifs_test_workspace "$KRB_MNT"
+
+# ── Verify session type ──────────────────────────────────────
+echo "verify session type" >> "$seqres.full"
+sec_type=$(_cifs_krb5_get_security_type)
+echo "security type: $sec_type" >> "$seqres.full"
+_cifs_krb5_verify_session || _fail "new session did not use Kerberos"
+
+# ── Basic I/O ─────────────────────────────────────────────────
+TESTFILE="$CIFS_TEST_WORK/data"
+echo "krb5-authenticated-data" > "$TESTFILE" 2>>"$seqres.full" || \
+	_fail "write with sec=krb5 failed"
+
+data=$(cat "$TESTFILE" 2>>"$seqres.full") || _fail "read with sec=krb5 failed"
+[ "$data" = "krb5-authenticated-data" ] || \
+	_fail "data mismatch: '$data'"
+
+# Clean up
+unlink "$TESTFILE" 2>/dev/null || true
+echo "sec=krb5 mount and I/O OK"
+
+status=0
+exit

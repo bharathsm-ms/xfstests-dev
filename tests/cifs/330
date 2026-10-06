@@ -1,0 +1,50 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-2.0
+#
+# CIFS: Kerberos + multichannel — sec=krb5 with multichannel mount
+#
+# Behavior under test
+# - Mount with sec=krb5,multichannel.
+# - Verify mount succeeds and I/O works.
+# - Check DebugData for multiple channels (if server supports it).
+# - Verify session type is Kerberos across all channels.
+#
+# Kernel code exercised
+#   sess.c (krb5 + multichannel session setup),
+#   smb2transport.c (signing across channels with krb5 key)
+
+. ./common/preamble
+. ./common/rc
+. ./common/cifs_krb5
+
+_begin_fstest auto quick krb5
+
+_cifs_krb5_test_init
+[ "$(id -u)" = 0 ] || _notrun "root required"
+[ -n "$TEST_DEV" ] || _notrun "TEST_DEV not set"
+
+_cifs_krb5_kinit || _fail "kinit failed"
+
+# ── Mount with krb5 + multichannel ────────────────────────────
+echo "mount sec=krb5,multichannel" >> "$seqres.full"
+_cifs_krb5_test_mount krb5 'multichannel,max_channels=2'
+_cifs_wait_multichannel "$TEST_DEV" 2 "$_cifs_krb5_connection"
+_cifs_test_workspace "$KRB_MNT"
+
+# ── I/O ───────────────────────────────────────────────────────
+TESTFILE="$CIFS_TEST_WORK/data"
+echo "krb5-multichannel-data" > "$TESTFILE" 2>>"$seqres.full" || \
+	_fail "write with krb5+multichannel failed"
+data=$(cat "$TESTFILE" 2>>"$seqres.full") || _fail "read failed"
+[ "$data" = "krb5-multichannel-data" ] || _fail "data mismatch: '$data'"
+
+# ── Check DebugData ───────────────────────────────────────────
+echo "check DebugData" >> "$seqres.full"
+_cifs_krb5_verify_session || _fail "multichannel session is not Kerberos"
+_cifs_wait_multichannel "$TEST_DEV" 2 "$_cifs_krb5_connection"
+
+unlink "$TESTFILE" 2>/dev/null || true
+echo "Kerberos with multichannel OK"
+
+status=0
+exit

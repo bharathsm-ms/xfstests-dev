@@ -3,231 +3,109 @@
 # CIFS: leverage cifscreds for multiuser mounts and enforce credential fallback
 #
 # Behavior under test:
-# - Stash credentials for the target host via cifscreds.
-# - Mount the share with multiuser authentication without passing a password in
-#   the option string and confirm basic I/O succeeds.
-# - Remove the stored credential and assert that a password-less mount then
-#   fails as expected.
+# - Authenticate secondary-UID I/O using a private cifscreds keyring.
+# - Clear the credential and require denied access on a fresh multiuser mount.
 
 . ./common/preamble
 . ./common/rc
 _begin_fstest auto quick auth
 
-[ "$FSTYP" = "cifs" ] || _notrun "requires CIFS"
+. ./common/cifs_test
+_cifs_test_init
 [ -n "$TEST_DEV" ] || _notrun "TEST_DEV not set"
-[ -n "$TEST_DIR" ] || _notrun "TEST_DIR not set"
+[ -r "${CIFS_CRED_FILE2:-}" ] || _notrun "CIFS_CRED_FILE2 required for a distinct server account"
 command -v python3 >/dev/null 2>&1 || _notrun "python3 required"
 command -v cifscreds >/dev/null 2>&1 || _notrun "cifscreds utility required"
-
-_test_unmount >/dev/null 2>&1
-
-_host_from_unc() { echo "$1" | sed -E 's#^//([^/]+)/.*#\1#'; }
-_share_from_unc() { echo "$1" | sed -E 's#^//[^/]+/([^/]+).*#\1#'; }
-HOST=$(_host_from_unc "$TEST_DEV")
-SHARE=$(_share_from_unc "$TEST_DEV")
-[ -n "$HOST" ] && [ -n "$SHARE" ] || _notrun "could not derive host/share"
-
-MO=$(echo "${MOUNT_OPTIONS:-}" | sed -e 's/^\s*-o\s*//')
-
-mapfile -t __parsed < <(python3 - "$MO" <<'PY'
-import sys
-opts = sys.argv[1]
-user = ''
-password = ''
-domain = ''
-others = []
-for raw in filter(None, opts.split(',')):
-    part = raw.strip()
-    if not part:
-        continue
-    key, _, val = part.partition('=')
-    kl = key.lower()
-    if kl in ('user', 'username'):
-        if not user:
-            user = val
-        continue
-    if kl in ('password', 'pass', 'passwd'):
-        if not password:
-            password = val
-        continue
-    if kl in ('domain', 'dom'):
-        if not domain:
-            domain = val
-        continue
-    if kl in ('credentials', 'cred', 'credfile'):
-        continue
-    others.append(part)
-print(user)
-print(password)
-print(domain)
-for part in others:
-    print(part)
-PY
-)
-
-[ ${#__parsed[@]} -ge 3 ] || _notrun "failed to parse mount options"
-USER=${__parsed[0]}
-PASS=${__parsed[1]}
-DOMAIN=${__parsed[2]}
-OTHER_OPTS=()
-for idx in "${!__parsed[@]}"; do
-    [ "$idx" -ge 3 ] || continue
-    OTHER_OPTS+=("${__parsed[$idx]}")
-done
-
-[ -n "$USER" ] && [ -n "$PASS" ] || {
-    # Fallback: try reading from credentials file referenced in MOUNT_OPTIONS
-    _cred_file=$(echo "${MOUNT_OPTIONS:-}" | sed -n 's/.*credentials=\([^,]*\).*/\1/p')
-    if [ -n "$_cred_file" ] && [ -r "$_cred_file" ]; then
-        [ -n "$USER" ] || USER=$(sed -n 's/^username=//p' "$_cred_file" | head -1)
-        [ -n "$PASS" ] || PASS=$(sed -n 's/^password=//p' "$_cred_file" | head -1)
-        DOMAIN=${DOMAIN:-$(sed -n 's/^domain=//p' "$_cred_file" | head -1)}
-        echo "cifs203: extracted credentials from $_cred_file" >> $seqres.full
-    fi
-    [ -n "$USER" ] || _notrun "username not found in mount options or credentials file"
-    [ -n "$PASS" ] || _notrun "password not found in mount options or credentials file"
-}
-
-_is_mounted() {
-    if command -v findmnt >/dev/null 2>&1; then
-        findmnt -rn -M "$1" >/dev/null 2>&1
-    else
-        grep -qs "[[:space:]]$1[[:space:]]" /proc/mounts
-    fi
-}
-
-MNT=""
-CREDS_ADDED=0
-MOUNTED=0
-_cleanup_203() {
-    if [ $MOUNTED -eq 1 ] && [ -n "$MNT" ] && _is_mounted "$MNT"; then
-        umount -l "$MNT" >/dev/null 2>&1 || true
-    fi
-    if [ -n "$MNT" ]; then
-        rm -rf "$MNT" >/dev/null 2>&1 || true
-    fi
-    if [ $CREDS_ADDED -eq 1 ]; then
-        cifscreds clearall >/dev/null 2>&1 || true
-    fi
-}
-_register_cleanup _cleanup_203
-
-MNT=$(mktemp -d /tmp/cifs203.mnt.XXXXXX) || _fail "mktemp mount failed"
-workdir="cifs203.$$"
-
-mount_opts=""
-multiuser_present=0
-for opt in "${OTHER_OPTS[@]}"; do
-    [ -n "$opt" ] || continue
-    [ "$opt" = "multiuser" ] && multiuser_present=1
-    if [ -n "$mount_opts" ]; then
-        mount_opts="$mount_opts,$opt"
-    else
-        mount_opts="$opt"
-    fi
-    done
-if [ -n "$mount_opts" ]; then
-    mount_opts="$mount_opts,username=$USER"
-else
-    mount_opts="username=$USER"
-fi
-if [ -n "$DOMAIN" ]; then
-    mount_opts="$mount_opts,domain=$DOMAIN"
-fi
-if [ $multiuser_present -eq 0 ]; then
-    mount_opts="$mount_opts,multiuser"
-fi
-
-log_msg() { echo "cifs203: $*" >>"$seqres.full"; }
-
-_run_cifscreds_cmd() {
-    CIFS203_HOST="$HOST" CIFS203_USER="$USER" CIFS203_PASS="$PASS" CIFS203_CMD="$1" \
-    python3 - <<'PY' >>"$seqres.full" 2>&1
-import os
-import pty
-import select
-import sys
-
-host = os.environ['CIFS203_HOST']
-user = os.environ['CIFS203_USER']
-password = os.environ['CIFS203_PASS']
-cmd = ['cifscreds', os.environ['CIFS203_CMD'], host, '-u', user]
-
-pid, fd = pty.fork()
-if pid == 0:
-    os.execvp(cmd[0], cmd)
-
-password_sent = False
+command -v keyctl >/dev/null || _notrun "keyctl required"
+command -v setpriv >/dev/null || _notrun "setpriv required"
+[[ "${CIFS_MULTIUSER_UID:-}" =~ ^[1-9][0-9]*$ ]] || _notrun "dedicated non-root CIFS_MULTIUSER_UID required"
+group=$(id -g "$CIFS_MULTIUSER_UID") || _notrun "dedicated credential UID does not exist"
+options="vers=3.1.1,multiuser,sec=ntlmssp,cache=none,uid=0,gid=$group,file_mode=0660,dir_mode=0770"
+_cifs_test_mount "$options"
+_cifs_test_mount_option multiuser
+_cifs_test_workspace "$CIFS_TEST_MNT"
+positive=$CIFS_TEST_WORK
+chmod 0777 "$positive" || _fail "allow worker access to owned workspace"
+_cifs_test_mount "$options"
+_cifs_test_mount_option multiuser
+negative="$CIFS_TEST_MNT/${positive##*/}/file"
+timeout --kill-after=5s 90 python3 - "$CIFS_CRED_FILE2" "$TEST_DEV" "$positive/file" "$negative" "$CIFS_MULTIUSER_UID" "$group" >> "$seqres.full" 2>&1 <<'PY'
+import configparser, json, socket, subprocess, sys
+from pathlib import Path
+settings = configparser.ConfigParser(interpolation=None)
+settings.read_string('[credentials]\n' + Path(sys.argv[1]).read_text())
+credentials = settings['credentials']
+username = credentials.get('username', credentials.get('user', ''))
+password = credentials.get('password', credentials.get('pass', ''))
+assert username and password and '\n' not in password and '\r' not in password
+username = username.rsplit('\\', 1)[-1]
+addresses = {entry[4][0] for entry in socket.getaddrinfo(sys.argv[2].split('/')[2], 445, socket.AF_INET, socket.SOCK_STREAM)}
+if len(addresses) != 1:
+    sys.exit(77)
+worker = r'''
+import errno, json, os, pty, select, signal, subprocess, sys, termios, time
+from pathlib import Path
+username, password, address, positive, negative = json.load(sys.stdin)
+def search():
+    return subprocess.run(['keyctl', 'search', '@s', 'logon', 'cifs:a:' + address], capture_output=True)
+assert search().returncode != 0, 'private keyring already contains a credential'
+child, master = pty.fork()
+if child == 0:
+    os.execvp('cifscreds', ['cifscreds', 'add', '-u', username, address])
+completed = False
+sent = False
+received = b''
 try:
-    while True:
-        rlist, _, _ = select.select([fd], [], [], 5)
-        if not rlist:
-            break
-        if fd in rlist:
+    deadline = time.monotonic() + 15
+    while time.monotonic() < deadline:
+        ready, ignored, errors = select.select([master], [], [], 0.05)
+        if ready:
             try:
-                data = os.read(fd, 1024)
-            except OSError:
-                break
-            if not data:
-                break
-            sys.stdout.buffer.write(data)
-            sys.stdout.flush()
-            if (not password_sent) and (b'Password' in data or b'password' in data):
-                os.write(fd, password.encode() + b'\n')
-                password_sent = True
+                data = os.read(master, 4096)
+            except OSError as error:
+                if error.errno != errno.EIO:
+                    raise
+                data = b''
+            received = (received + data)[-4096:]
+            if not sent and b'password' in received.lower():
+                assert not termios.tcgetattr(master)[3] & termios.ECHO
+                secret = password.encode() + b'\n'
+                assert os.write(master, secret) == len(secret)
+                sent = True
+        waited, status = os.waitpid(child, os.WNOHANG)
+        if waited:
+            completed = True
+            assert sent and os.waitstatus_to_exitcode(status) == 0, 'cifscreds add failed'
+            break
+    assert completed, 'cifscreds prompt timed out'
 finally:
-    try:
-        os.close(fd)
-    except OSError:
-        pass
-
-_, status = os.waitpid(pid, 0)
-sys.exit(os.WEXITSTATUS(status))
+    if not completed:
+        os.kill(child, signal.SIGKILL)
+        os.waitpid(child, 0)
+    os.close(master)
+assert search().returncode == 0, 'credential not found in private keyring'
+path = Path(positive)
+assert path.write_bytes(b'cred test\n') == 10
+assert path.read_bytes() == b'cred test\n'
+subprocess.run(['cifscreds', 'clear', address], check=True, capture_output=True, timeout=15)
+assert search().returncode != 0, 'clear left a credential in the private keyring'
+try:
+    Path(negative).read_bytes()
+except OSError as error:
+    assert error.errno in (errno.EACCES, errno.ENOKEY), 'unexpected failure after credential removal'
+else:
+    raise AssertionError('fresh multiuser access succeeded without a credential')
+'''
+process = subprocess.run(['setpriv', '--reuid=' + sys.argv[5], '--regid=' + sys.argv[6], '--clear-groups',
+                          'keyctl', 'session', '-', sys.executable, '-c', worker],
+                         input=json.dumps([username, password, next(iter(addresses)), sys.argv[3], sys.argv[4]]),
+                         text=True, capture_output=True, timeout=75)
+assert process.returncode == 0, 'private credential authentication or negative control failed: ' + process.stderr
 PY
-}
-
-_add_cifscreds() {
-    if _run_cifscreds_cmd add; then
-        return 0
-    fi
-    log_msg "add failed, retrying with update"
-    _run_cifscreds_cmd update
-}
-
-log_msg "adding credential for //$HOST user=$USER"
-if ! _add_cifscreds; then
-    _notrun "cifscreds add failed"
-fi
-CREDS_ADDED=1
-
-log_msg "mounting //$HOST/$SHARE with cifscreds"
-log_msg "mount options: $mount_opts"
-if ! setsid mount -t cifs "$TEST_DEV" "$MNT" -o "$mount_opts" >>"$seqres.full" 2>&1 </dev/null; then
-    _notrun "multiuser mount failed"
-fi
-MOUNTED=1
-
-mkdir -p "$MNT/$workdir" || _fail "mkdir via multiuser mount failed"
-echo "cred test" >"$MNT/$workdir/file" || _fail "write via multiuser mount failed"
-cat "$MNT/$workdir/file" >/dev/null 2>&1 || _fail "read via multiuser mount failed"
-rm -rf "$MNT/$workdir" || _fail "cleanup via multiuser mount failed"
-
-umount "$MNT" || _fail "umount after multiuser mount failed"
-MOUNTED=0
-
-log_msg "clearing credential for //$HOST user=$USER"
-cifscreds clearall >>"$seqres.full" 2>&1 || true
-CREDS_ADDED=0
-
-log_msg "mount without stored credential (expect failure)"
-log_msg "retry mount options: $mount_opts"
-if setsid mount -t cifs "$TEST_DEV" "$MNT" -o "$mount_opts" >>"$seqres.full" 2>&1 </dev/null; then
-    umount "$MNT" >/dev/null 2>&1 || true
-    _fail "mount succeeded without stored credential"
-fi
-
-rmdir "$MNT" >/dev/null 2>&1 || true
-MNT=""
+result=$?
+[ "$result" -ne 77 ] || _notrun "single IPv4 address required for cifscreds fixture"
+[ "$result" -eq 0 ] || _fail "multiuser credential authentication/denial failed"
+[ "$(cat "$negative")" = "cred test" ] || _fail "root control read failed after credential removal"
 
 echo "cifs203: cifscreds multiuser mount OK"
 

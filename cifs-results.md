@@ -2,6 +2,13 @@
 
 **Generated**: 2026-03-06
 
+This is an archived cross-backend report. See the
+[latest results page](cifs-results_latest.md) and the
+[2026-10-06 cross-server matrix](cifs-results-20261006.md) for dated Samba,
+Windows, Azure Files and ksmbd outcomes, source-version limits and commit
+selection. The March tables below remain historical; do not combine them
+with the later runs.
+
 ## Summary
 
 | Result | Samba | Windows Server | Azure Files |

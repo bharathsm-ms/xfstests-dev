@@ -77,7 +77,8 @@ os.close(fd)
 echo "cifs215: >4G boundary OK" >> "$seqres.full"
 
 # --- Test 3: verify stat consistency after reopen ---
-echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || true
+_test_unmount || _fail "unmount before reopen failed"
+_test_mount || _fail "remount before reopen failed"
 
 sz2=$(stat -c %s "$W/big4g")
 [ "$sz2" -eq "$expected" ] || _fail ">4G size after reopen: expected $expected got $sz2"

@@ -1,0 +1,116 @@
+#!/bin/bash
+
+. ./common/preamble
+. ./common/rc
+. ./common/cifs_test
+. ./common/tracing
+
+_begin_fstest auto quick
+
+_cifs_test_init
+command -v python3 >/dev/null || _notrun "python3 required"
+command -v timeout >/dev/null || _notrun "timeout required"
+[ "${CIFS_ALLOW_OFFLOAD_TRACE:-}" = yes ] ||
+	_notrun "set CIFS_ALLOW_OFFLOAD_TRACE=yes on an isolated CIFS test client"
+_require_ftrace
+grep -qw function "$FTRACE_ROOT/available_tracers" || _notrun "function tracer required"
+grep -q '^smb2_decrypt_offload\([[:space:]]\|$\)' "$FTRACE_ROOT/available_filter_functions" ||
+	_notrun "smb2_decrypt_offload is not traceable"
+[ ! -e "$FTRACE_INSTANCES_DIR/fstests.$seq" ] || _notrun "test tracing instance already exists"
+
+_cleanup_406()
+{
+	if [ -d "${FTRACE_DIR:-}" ]; then
+		echo 0 > "$FTRACE_DIR/tracing_on" || status=1
+		echo nop > "$FTRACE_DIR/current_tracer" || status=1
+		_ftrace_cleanup || status=1
+	fi
+	_cifs_test_cleanup
+}
+_register_cleanup _cleanup_406
+_ftrace_setup || _notrun "cannot create a private trace instance"
+echo 0 > "$FTRACE_DIR/tracing_on" || _fail "disable private tracing"
+echo 64 > "$FTRACE_DIR/buffer_size_kb" || _fail "bound trace buffer"
+echo smb2_decrypt_offload > "$FTRACE_DIR/set_ftrace_filter" || _fail "set function filter"
+echo function > "$FTRACE_DIR/current_tracer" || _notrun "private function tracing unavailable"
+
+_encrypted_io_406()
+{
+	timeout --kill-after=5s 90 python3 - "$1" "$2" "$3" >> "$seqres.full" 2>&1 <<'PY'
+import concurrent.futures, hashlib, os, sys, threading
+
+path, action, length = sys.argv[1:]
+length = int(length)
+block_size = 1024 * 1024
+blocks = [hashlib.sha256(str(number).encode()).digest() * (block_size // 32)
+          for number in range(8)]
+if action == 'prepare':
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        for payload in blocks:
+            assert os.write(descriptor, payload) == len(payload), 'short fixture write'
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+else:
+    assert action == 'read' and 0 < length <= block_size
+    barrier = threading.Barrier(8, timeout=20)
+    def reader(number):
+        descriptor = os.open(path, os.O_RDONLY)
+        try:
+            for iteration in range(32):
+                block = (number + iteration) % len(blocks)
+                barrier.wait()
+                payload = os.pread(descriptor, length, block * block_size)
+                assert payload == blocks[block][:length], 'encrypted read mismatch'
+        except BaseException:
+            barrier.abort()
+            raise
+        finally:
+            os.close(descriptor)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+        list(executor.map(reader, range(8)))
+PY
+	[ "$?" -eq 0 ] || _fail "encrypted $2 workload failed"
+}
+
+_traced_read_406()
+{
+	local path="$1" length="$2" required="$3" observed
+	echo > "$FTRACE_DIR/trace" || _fail "clear private trace buffer"
+	echo 1 > "$FTRACE_DIR/tracing_on" || _fail "enable private tracing"
+	_encrypted_io_406 "$path" read "$length"
+	echo 0 > "$FTRACE_DIR/tracing_on" || _fail "stop private tracing"
+	_ftrace_dump > "$tmp.offload-trace" || _fail "read private function trace"
+	observed=$(awk '!/^#/ && /smb2_decrypt_offload/ {count++} END {print count+0}' "$tmp.offload-trace")
+	printf 'esize=%s read=%s offload_calls=%s\n' "$threshold" "$length" "$observed" >> "$seqres.full"
+	cat "$tmp.offload-trace" >> "$seqres.full"
+	if [ "$required" = yes ]; then
+		[ "$observed" -gt 0 ] || _fail "large concurrent encrypted reads never used decryption offload"
+	else
+		[ "$observed" -eq 0 ] || _fail "decryption offload occurred in the disabled/below-threshold control"
+	fi
+}
+
+relative=
+for threshold in 0 65536; do
+	_cifs_test_mount "vers=3.1.1,seal,nomultichannel,cache=none,rsize=1048576,wsize=1048576,esize=$threshold"
+	_cifs_test_mount_option seal
+	_cifs_test_mount_option cache=none
+	if [ "$threshold" -ne 0 ]; then
+		_cifs_test_mount_option "esize=$threshold"
+	fi
+	if [ -z "$relative" ]; then
+		_cifs_test_workspace "$CIFS_TEST_MNT"
+		relative=${CIFS_TEST_WORK##*/}/data
+		_encrypted_io_406 "$CIFS_TEST_MNT/$relative" prepare 1048576
+	fi
+	_traced_read_406 "$CIFS_TEST_MNT/$relative" 4096 no
+	required=no
+	[ "$threshold" -eq 0 ] || required=yes
+	_traced_read_406 "$CIFS_TEST_MNT/$relative" 1048576 "$required"
+done
+
+echo "Silence is golden"
+status=0
+exit

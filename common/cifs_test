@@ -10,12 +10,16 @@ _cifs_test_init()
 	_cifs_test_children=()
 	_cifs_test_settings=()
 	_cifs_test_values=()
+	_cifs_test_server_restore=false
 	_register_cleanup _cifs_test_cleanup
 }
 
 _cifs_test_cleanup()
 {
 	local child path index
+	if $_cifs_test_server_restore; then
+		_cifs_test_samba_service start >> "$seqres.full" 2>&1 || status=1
+	fi
 	for child in "${_cifs_test_children[@]}"; do
 		kill "$child" 2>/dev/null || true
 	done
@@ -156,6 +160,30 @@ PY
 	else
 		timeout --kill-after=5s 60 systemctl "$1" smbd
 	fi
+}
+
+_cifs_test_require_samba_restart()
+{
+	[ "${CIFS_ALLOW_SAMBA_RESTART:-}" = yes ] ||
+		_notrun "set CIFS_ALLOW_SAMBA_RESTART=yes only on a dedicated Samba test server"
+	case "$TEST_DEV" in
+		//127.0.0.1/*) ;;
+		*) _notrun "server restart requires a literal loopback TEST_DEV" ;;
+	esac
+	command -v timeout >/dev/null || _notrun "timeout required"
+	if [ -n "${CIFS_SAMBA_CONTROL:-}" ]; then
+		command -v python3 >/dev/null || _notrun "python3 required"
+	fi
+	_cifs_test_samba_service is-active >> "$seqres.full" 2>&1 || _notrun "test smbd is not active"
+}
+
+_cifs_test_restart_samba()
+{
+	_cifs_test_server_restore=true
+	_cifs_test_samba_service restart >> "$seqres.full" 2>&1 ||
+		_fail "restart smbd failed"
+	_cifs_test_samba_service is-active >> "$seqres.full" 2>&1 || _fail "smbd failed to recover"
+	_cifs_test_server_restore=false
 }
 
 _cifs_test_ioctl_info()

@@ -1,0 +1,44 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-2.0
+#
+# CIFS: sec=krb5i — Kerberos integrity (signing) mount and I/O
+#
+# Behavior under test
+# - Mount with sec=krb5i (Kerberos with integrity protection).
+# - Verify mount succeeds and I/O works.
+# - Require the new session to authenticate with Kerberos and require signing.
+#
+# Kernel code exercised
+#   smb2transport.c (Kerberos MAC/signing per packet)
+
+. ./common/preamble
+. ./common/rc
+. ./common/cifs_krb5
+
+_begin_fstest auto quick krb5
+
+_cifs_krb5_test_init
+[ "$(id -u)" = 0 ] || _notrun "root required"
+[ -n "$TEST_DEV" ] || _notrun "TEST_DEV not set"
+
+_cifs_krb5_kinit || _fail "kinit failed"
+
+echo "mount sec=krb5i" >> "$seqres.full"
+_cifs_krb5_test_mount krb5i
+_cifs_test_workspace "$KRB_MNT"
+awk -v target="$KRB_MNT" '$2 == target {split($4, options, ","); for (option in options) if (options[option] == "sec=krb5i") found=1} END {exit !found}' \
+	/proc/self/mounts || _fail "mount does not require Kerberos signing"
+
+# I/O through krb5i
+TESTFILE="$CIFS_TEST_WORK/data"
+echo "krb5i-integrity-data" > "$TESTFILE" 2>>"$seqres.full" || \
+	_fail "write with sec=krb5i failed"
+data=$(cat "$TESTFILE" 2>>"$seqres.full") || _fail "read with sec=krb5i failed"
+[ "$data" = "krb5i-integrity-data" ] || _fail "data mismatch: '$data'"
+
+unlink "$TESTFILE" 2>/dev/null || true
+
+echo "sec=krb5i mount and I/O OK"
+
+status=0
+exit

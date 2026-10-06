@@ -1,0 +1,61 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-2.0
+#
+# CIFS: Kerberos reconnect after TCP disconnect
+#
+# Behavior under test
+# - Mount with sec=krb5, write data.
+# - Disconnect only the socket created by this test's mount.
+# - Wait for reconnect.
+# - Read data back — should succeed after re-authentication.
+# - Verify session is still Kerberos in DebugData.
+#
+# Kernel code exercised
+#   reconnect_dfs_server() / cifs_reconnect(),
+#   SMB2_auth_kerberos (re-auth), cifs_get_spnego_key (re-upcall)
+
+. ./common/preamble
+. ./common/rc
+. ./common/cifs_krb5
+
+_begin_fstest auto stress krb5
+
+_cifs_krb5_test_init
+[ "$(id -u)" = 0 ] || _notrun "root required"
+[ -n "$TEST_DEV" ] || _notrun "TEST_DEV not set"
+
+command -v ss >/dev/null || _notrun "ss required"
+command -v python3 >/dev/null || _notrun "python3 required"
+
+# ── Mount with Kerberos ───────────────────────────────────────
+_cifs_krb5_kinit || _fail "kinit failed"
+_cifs_test_socket_snapshot > "$tmp.before"
+_cifs_krb5_test_mount krb5 'cache=none,nomultichannel,echo_interval=1'
+_cifs_test_socket_snapshot > "$tmp.after"
+_cifs_test_new_socket "$tmp.before" "$tmp.after"
+_cifs_test_workspace "$KRB_MNT"
+
+TESTFILE="$CIFS_TEST_WORK/data"
+echo "pre-disconnect-krb5" > "$TESTFILE" 2>>"$seqres.full" || \
+	_fail "write failed"
+
+# ── Disconnect ────────────────────────────────────────────────
+_cifs_test_disconnect >> "$seqres.full" 2>&1 || _fail "disconnect test-owned Kerberos socket"
+
+# ── Re-read after reconnect ──────────────────────────────────
+echo "re-read after reconnect" >> "$seqres.full"
+data=$(timeout --kill-after=5s 45 cat "$TESTFILE" 2>>"$seqres.full") || _fail "Kerberos reconnect read failed"
+
+[ "$data" = "pre-disconnect-krb5" ] || \
+	_fail "data mismatch after reconnect: '$data'"
+
+# ── Verify still Kerberos ─────────────────────────────────────
+_cifs_krb5_verify_session || _fail "reconnected session is not Kerberos"
+echo post-reconnect > "$TESTFILE" || _fail "reconnected write failed"
+[ "$(cat "$TESTFILE")" = post-reconnect ] || _fail "reconnected write/read mismatch"
+
+unlink "$TESTFILE" 2>/dev/null || true
+echo "Kerberos reconnect after disconnect OK"
+
+status=0
+exit
