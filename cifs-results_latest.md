@@ -8,14 +8,19 @@ cross-server execution. Older results apply to older test sources and fixtures.
 
 | Target / Scope | PASS | FAIL | SKIP | TIMEOUT | Deferred | Total |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| Samba 4.22.11, Oct 6 plus supplement | 240 | 33 | 32 | 0 | 0 | 305 |
-| Azure primary, Oct 3-6 | 207 | 32 | 63 | 2 | 1 | 305 |
+| Samba, Oct 6 plus supplement | 240 | 33 | 32 | 0 | 0 | 305 |
+| Azure, Oct 3-6 combined latest attempts | 207 | 33 | 61 | 3 | 1 | 305 |
 | Windows, Oct 1 coverage run plus Oct 3 review | 219 | 30 | 55 | 0 | 1 | 305 |
 | ksmbd, Sep 25 | 209 | 17 | 41 | 2 | 0 | 269 |
-| Samba 4.21.4, Oct 3 review only | 2 | 6 | 40 | 0 | 0 | 48 |
 
-The dated report also lists the four-test Azure canary/preproduction probes
-separately, 19 selected test changes and 20 held candidates with reasons.
+Samba uses only the latest tested server, **4.22.11**. Azure combines the latest
+observed result per test from the main endpoint and later canary/preproduction
+probes, not a new single-endpoint suite run. Preproduction changes `275` from
+SKIP to TIMEOUT and `385` from SKIP to FAIL; other Azure outcomes are unchanged.
+"Azure Primary" previously meant the main Azure Files endpoint.
+
+The dated report retains the endpoint-specific four-test probe results,
+19 selected test changes and 20 held candidates with reasons.
 Its source-version caveats are part of the results, especially for repaired
 credential tests. Historical reports below remain unchanged observations.
 
