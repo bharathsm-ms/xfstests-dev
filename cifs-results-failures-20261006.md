@@ -1,22 +1,22 @@
 # CIFS Failure and Skip Report
 
-**Updated:** 2026-10-08 | **Results through:** 2026-10-07
+**Updated:** 2026-10-08 | **Results through:** 2026-10-08
 
 [Results overview](cifs-results_latest.md) | [Complete test matrix](cifs-results-20261006.md#complete-per-test-matrix)
 
 This report explains non-passing results for the same **290 committed test
-IDs** as the results matrix: 269 in the last-known remote inventory and 21
-committed locally but not pushed. Untracked tests are excluded. Passing tests
-remain in the complete matrix and are not repeated here.
+IDs** as the results matrix. Untracked tests are excluded. Passing tests remain
+in the complete matrix and are not repeated here.
 
 Reasons below describe recorded assertions, errors or prerequisite checks,
 not necessarily proven server bugs. Skips do not establish that a server lacks
 a feature in every configuration. Runs used different source versions and
 fixtures; tests `192`, `194`, `225`, `236` and `275` have pending local repairs.
-The latest October 7 validation reran repaired tests `103`, `116`, `157`, `171`,
+The October 7 validation reran repaired tests `103`, `116`, `157`, `171`,
 `216`, `251` and `310` on all four servers. Their observed outcomes are merged
 into the matrix, and fresh reasons replace older diagnostics for these tests.
-Earlier raw evidence is unchanged.
+The October 8 ksmbd batch added the 21 previously missing outcomes: one pass,
+one failure, and 19 skips. Earlier raw evidence is unchanged.
 
 **Key:** ❌ fail, ⏭️ skip, ⏱️ timeout, ⏸️ deliberately deferred (not run).
 Missing results are not skips.
@@ -28,10 +28,10 @@ Missing results are not skips.
 | Samba 4.22.11 | 24 | 27 | 0 | 0 | 51 |
 | Azure | 26 | 54 | 3 | 1 | 84 |
 | Windows | 22 | 49 | 0 | 1 | 72 |
-| ksmbd | 16 | 41 | 2 | 0 | 59 |
+| ksmbd | 17 | 60 | 2 | 0 | 79 |
 
-ksmbd has no recorded result for 21 additional committed IDs; those are shown
-as `-` in the complete matrix and are not included in this summary.
+All 290 committed IDs now have recorded outcomes on ksmbd. The 19 new skips
+are recorded prerequisite or policy outcomes, not converted missing results.
 
 [Test-Issue Review](#test-issue-review) | [Samba](#samba) | [Azure](#azure) | [Windows](#windows) | [ksmbd](#ksmbd) | [Evidence](#evidence)
 
@@ -47,7 +47,8 @@ evidence; they do not establish that every remaining failure is a server defect.
 [Per-test live results and limitations](cifs-results-20261006.md#october-7-repair-validation).
 ksmbd used a temporary alternate-port fixture and loopback default-port forwarder
 without interrupting host Samba. All seven tests now have fresh ksmbd results;
-the other ksmbd rows still describe September 25 sources.
+those results remain unchanged. The October 8 batch adds the previously missing
+IDs; other ksmbd rows still describe September 25 sources.
 
 | Test | Local Repair | What Still Fails |
 | --- | --- | --- |
@@ -406,8 +407,15 @@ assertion; `171` still skips for unavailable leasing. The temporary fixture
 used loopback port 1445 and a default-port forwarder, without interrupting host
 Samba. Its module, daemon, forwarder, mounts and credentials were removed.
 
+The October 8 batch added **1 PASS, 1 FAIL, 19 SKIP** for the 21 previously
+unrecorded IDs. Test `407` passed; `390` failed after POSIX negotiation when
+`chmod` returned permission denied. Its test-local file removal also failed,
+but the disposable fixture storage and all owned mounts were removed afterward.
+Global DFS-cache flushing, Samba restart, CIFS-client reload, and offload tracing
+remained explicitly disabled. No test assertion or expected output changed.
+
 Server multichannel, SMB2 leases and durable handles remained disabled; DFS and
-Kerberos fixtures were not configured. Other rows below use the historical
+Kerberos fixtures were not configured. Rows not marked October 7 or 8 use the historical
 findings in the [ksmbd report](cifs-results-ksmbd-20260925.md), not newly rerun
 tests. The intermediate `157` connection failure was a port-fixture mismatch,
 preserved separately and replaced only after the final live PASS.
@@ -431,6 +439,7 @@ preserved separately and replaced only after the final live PASS.
 | cifs/380 | ❌ | Parsed file DACL comparison failed during copying; directory copying was not reached. Descriptor inequality does not by itself prove changed effective access. |
 | cifs/382 | ❌ | Opening for write succeeded after setting and reading back the DOS read-only bit; final data validation was not reached. |
 | cifs/388 | ❌ | `chmod 0755` succeeded, but the following mode comparison failed. Actual post-chmod mode was not logged; earlier link/rename/timestamp checks completed. |
+| cifs/390 | ❌ | October 8: after successful POSIX negotiation, file `chmod` raised `PermissionError: [Errno 13] Permission denied`; test-file removal also logged permission denial. This is not a confirmed data-corruption or server-only diagnosis. |
 | cifs/394 | ❌ | The native helper received an unexpected `F_GETLK` lock type. The actual type and phase were not logged; this was a userspace assertion abort, not a kernel crash. |
 
 ### Skips
@@ -472,12 +481,31 @@ preserved separately and replaced only after the final live PASS.
 | cifs/289 | ⏭️ | `drop_dir_cache` was not writable. |
 | cifs/313 | ⏭️ | DFS fixture `CIFS_DFS_ROOT` was not configured. |
 | cifs/314 | ⏭️ | DFS fixture `CIFS_DFS_ROOT` was not configured. |
+| cifs/315 | ⏭️ | October 8: `CIFS_DFS_ROOT` was not configured; the DFS-cache test did not reach its feature assertions. |
 | cifs/316 | ⏭️ | DFS fixture `CIFS_DFS_ROOT` was not configured. |
 | cifs/317 | ⏭️ | DFS fixture `CIFS_DFS_ROOT` was not configured. |
 | cifs/319 | ⏭️ | DFS fixture `CIFS_DFS_ROOT` was not configured. |
+| cifs/320 | ⏭️ | October 8: `CIFS_DFS_ROOT` was not configured; target failover was not exercised. |
 | cifs/321 | ⏭️ | DFS fixture `CIFS_DFS_ROOT` was not configured. |
 | cifs/322 | ⏭️ | DFS fixture `CIFS_DFS_ROOT` was not configured. |
+| cifs/323 | ⏭️ | October 8: `CIFS_KRB5_REALM` was not configured. |
+| cifs/324 | ⏭️ | October 8: `CIFS_KRB5_REALM` was not configured. |
+| cifs/326 | ⏭️ | October 8: `CIFS_KRB5_REALM` was not configured. |
+| cifs/327 | ⏭️ | October 8: `CIFS_KRB5_REALM` was not configured. |
+| cifs/328 | ⏭️ | October 8: `CIFS_KRB5_REALM` was not configured. |
+| cifs/329 | ⏭️ | October 8: `CIFS_KRB5_REALM` was not configured. |
+| cifs/330 | ⏭️ | October 8: `CIFS_KRB5_REALM` was not configured. |
+| cifs/331 | ⏭️ | October 8: `CIFS_KRB5_REALM` was not configured. |
+| cifs/332 | ⏭️ | October 8: `CIFS_KRB5_REALM` was not configured. |
+| cifs/333 | ⏭️ | October 8: `CIFS_KRB5_REALM` was not configured. |
+| cifs/355 | ⏭️ | October 8: the target server did not advertise SMB3 directory leasing. |
+| cifs/356 | ⏭️ | October 8: `CIFS_CRED_FILE2` for a distinct server account was not configured. |
+| cifs/379 | ⏭️ | October 8: a snapshot-enabled share with existing snapshots was required. |
+| cifs/387 | ⏭️ | October 8: dedicated Samba restart opt-in was disabled; this is not a ksmbd restart test. |
+| cifs/392 | ⏭️ | October 8: the target session had no server-interface information. |
 | cifs/396 | ⏭️ | DFS fixture `CIFS_DFS_ROOT` was not configured. |
+| cifs/404 | ⏭️ | October 8: `CIFS_KRB5_REALM` was not configured. |
+| cifs/406 | ⏭️ | October 8: `CIFS_ALLOW_OFFLOAD_TRACE` was disabled; tracing was not enabled merely to replace a skip. |
 
 ### Timeouts
 
@@ -488,6 +516,7 @@ preserved separately and replaced only after the final live PASS.
 
 ## Evidence
 
+- October 8 ksmbd completion: `results-runs/cifs-ksmbd-remaining-20261008`, 437 verified checksummed files, 21 verified xUnit outcomes, 103 matching source hashes, and fixture/host restoration records. No counters were reset; no new coverage percentage is claimed.
 - Latest seven-test Samba/Azure/Windows batch: `results-runs/cifs-repaired-seven-20261007`, 627 checksummed files, 21 verified xUnit outcomes.
 - Latest seven-test ksmbd batch: `results-runs/cifs-repaired-seven-ksmbd-20261007-final`, 280 checksummed files, seven verified xUnit outcomes, listener/forwarder provenance and restoration audits.
 - Preserved ksmbd preparation: `results-runs/cifs-repaired-seven-ksmbd-20261007` (201 checksummed files, no tests; loopback-device listener check stopped setup) and `results-runs/cifs-repaired-seven-ksmbd-20261007-retry` (280 checksummed files, seven tests; `157` could not connect without the default-port forwarder). The first stopped attempt's owned stale daemon lock was verified against its exited PID and removed before retrying.

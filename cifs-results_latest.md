@@ -1,9 +1,8 @@
 # CIFS Test Results
 
-**Updated:** 2026-10-08 | **Results through:** 2026-10-07
+**Updated:** 2026-10-08 | **Results through:** 2026-10-08
 
-**Scope:** 290 committed tests: 269 in the last-known remote inventory and
-21 committed locally but not yet pushed. Untracked tests are excluded.
+**Scope:** 290 committed test IDs. Untracked tests are excluded.
 
 ## Summary
 
@@ -12,10 +11,10 @@
 | Samba 4.22.11 | 239 | 24 | 27 | 0 | 0 | 290 |
 | Azure | 206 | 26 | 54 | 3 | 1 | 290 |
 | Windows | 218 | 22 | 49 | 0 | 1 | 290 |
-| ksmbd | 210 | 16 | 41 | 2 | 0 | 269 |
+| ksmbd | 211 | 17 | 60 | 2 | 0 | 290 |
 
-ksmbd has no recorded results for 21 committed tests. These are shown as `-`
-in the matrix, not counted as skips. Deferred tests were not run.
+All four servers have recorded outcomes for all 290 committed test IDs.
+Deferred tests were not run; skips are not passes.
 
 [View all 290 test results](#complete-per-test-matrix)
 | [Failure and skip reasons](cifs-results-failures-20261006.md)
@@ -242,23 +241,23 @@ in the matrix, not counted as skips. Deferred tests were not run.
 | cifs/312 | ✅ | ✅ | ✅ | ✅ |
 | cifs/313 | ✅ | ⏭️ | ⏭️ | ⏭️ |
 | cifs/314 | ✅ | ⏭️ | ⏭️ | ⏭️ |
-| cifs/315 | ⏭️ | ⏭️ | ⏭️ | - |
+| cifs/315 | ⏭️ | ⏭️ | ⏭️ | ⏭️ |
 | cifs/316 | ✅ | ⏭️ | ⏭️ | ⏭️ |
 | cifs/317 | ❌ | ⏭️ | ⏭️ | ⏭️ |
 | cifs/319 | ✅ | ⏭️ | ⏭️ | ⏭️ |
-| cifs/320 | ✅ | ⏭️ | ⏭️ | - |
+| cifs/320 | ✅ | ⏭️ | ⏭️ | ⏭️ |
 | cifs/321 | ✅ | ⏭️ | ⏭️ | ⏭️ |
 | cifs/322 | ✅ | ⏭️ | ⏭️ | ⏭️ |
-| cifs/323 | ✅ | ⏭️ | ⏭️ | - |
-| cifs/324 | ✅ | ⏭️ | ⏭️ | - |
-| cifs/326 | ✅ | ⏭️ | ⏭️ | - |
-| cifs/327 | ✅ | ⏭️ | ⏭️ | - |
-| cifs/328 | ✅ | ⏭️ | ⏭️ | - |
-| cifs/329 | ✅ | ⏭️ | ⏭️ | - |
-| cifs/330 | ✅ | ⏭️ | ⏭️ | - |
-| cifs/331 | ✅ | ⏭️ | ⏭️ | - |
-| cifs/332 | ✅ | ⏭️ | ⏭️ | - |
-| cifs/333 | ✅ | ⏭️ | ⏭️ | - |
+| cifs/323 | ✅ | ⏭️ | ⏭️ | ⏭️ |
+| cifs/324 | ✅ | ⏭️ | ⏭️ | ⏭️ |
+| cifs/326 | ✅ | ⏭️ | ⏭️ | ⏭️ |
+| cifs/327 | ✅ | ⏭️ | ⏭️ | ⏭️ |
+| cifs/328 | ✅ | ⏭️ | ⏭️ | ⏭️ |
+| cifs/329 | ✅ | ⏭️ | ⏭️ | ⏭️ |
+| cifs/330 | ✅ | ⏭️ | ⏭️ | ⏭️ |
+| cifs/331 | ✅ | ⏭️ | ⏭️ | ⏭️ |
+| cifs/332 | ✅ | ⏭️ | ⏭️ | ⏭️ |
+| cifs/333 | ✅ | ⏭️ | ⏭️ | ⏭️ |
 | cifs/334 | ✅ | ✅ | ✅ | ✅ |
 | cifs/335 | ✅ | ❌ | ❌ | ✅ |
 | cifs/336 | ❌ | ✅ | ✅ | ✅ |
@@ -277,8 +276,8 @@ in the matrix, not counted as skips. Deferred tests were not run.
 | cifs/352 | ✅ | ✅ | ✅ | ✅ |
 | cifs/353 | ✅ | ✅ | ✅ | ✅ |
 | cifs/354 | ❌ | ✅ | ✅ | ❌ |
-| cifs/355 | ✅ | ⏭️ | ✅ | - |
-| cifs/356 | ✅ | ❌ | ⏭️ | - |
+| cifs/355 | ✅ | ⏭️ | ✅ | ⏭️ |
+| cifs/356 | ✅ | ❌ | ⏭️ | ⏭️ |
 | cifs/357 | ✅ | ✅ | ✅ | ✅ |
 | cifs/358 | ❌ | ❌ | ✅ | ❌ |
 | cifs/359 | ✅ | ✅ | ✅ | ✅ |
@@ -298,18 +297,18 @@ in the matrix, not counted as skips. Deferred tests were not run.
 | cifs/374 | ✅ | ✅ | ✅ | ✅ |
 | cifs/375 | ✅ | ✅ | ✅ | ✅ |
 | cifs/376 | ❌ | ❌ | ❌ | ✅ |
-| cifs/379 | ✅ | ⏭️ | ⏭️ | - |
+| cifs/379 | ✅ | ⏭️ | ⏭️ | ⏭️ |
 | cifs/380 | ✅ | ✅ | ❌ | ❌ |
 | cifs/381 | ✅ | ✅ | ✅ | ✅ |
 | cifs/382 | ✅ | ✅ | ✅ | ❌ |
 | cifs/383 | ✅ | ✅ | ✅ | ✅ |
 | cifs/384 | ✅ | ✅ | ✅ | ✅ |
 | cifs/386 | ✅ | ✅ | ✅ | ✅ |
-| cifs/387 | ✅ | ⏭️ | ⏭️ | - |
+| cifs/387 | ✅ | ⏭️ | ⏭️ | ⏭️ |
 | cifs/388 | ✅ | ❌ | ❌ | ❌ |
 | cifs/389 | ✅ | ✅ | ✅ | ✅ |
-| cifs/390 | ✅ | ⏭️ | ❌ | - |
-| cifs/392 | ✅ | ✅ | ✅ | - |
+| cifs/390 | ✅ | ⏭️ | ❌ | ❌ |
+| cifs/392 | ✅ | ✅ | ✅ | ⏭️ |
 | cifs/393 | ❌ | ❌ | ✅ | ✅ |
 | cifs/394 | ❌ | ✅ | ✅ | ❌ |
 | cifs/396 | ✅ | ⏭️ | ⏭️ | ⏭️ |
@@ -317,6 +316,6 @@ in the matrix, not counted as skips. Deferred tests were not run.
 | cifs/399 | ✅ | ✅ | ✅ | ✅ |
 | cifs/400 | ✅ | ✅ | ✅ | ✅ |
 | cifs/403 | ✅ | ✅ | ✅ | ✅ |
-| cifs/404 | ✅ | ⏭️ | ⏭️ | - |
-| cifs/406 | ✅ | ✅ | ⏭️ | - |
-| cifs/407 | ✅ | ⏭️ | ✅ | - |
+| cifs/404 | ✅ | ⏭️ | ⏭️ | ⏭️ |
+| cifs/406 | ✅ | ✅ | ⏭️ | ⏭️ |
+| cifs/407 | ✅ | ⏭️ | ✅ | ✅ |

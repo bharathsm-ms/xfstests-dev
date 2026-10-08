@@ -1,10 +1,9 @@
 # CIFS Per-Test Results
 
-**Updated:** 2026-10-08 | **Results through:** 2026-10-07
+**Updated:** 2026-10-08 | **Results through:** 2026-10-08
 
-**Scope:** 290 committed test IDs at `bd42fe80`: 269 in the last-known remote
-revision `1ebff9ed` and 21 committed locally but not yet pushed. Untracked tests
-are excluded.
+**Scope:** 290 committed test IDs. Untracked tests are excluded; results retain
+the dated source and fixture limitations described below.
 
 [Results overview](cifs-results_latest.md)
 | [Failure and skip reasons](cifs-results-failures-20261006.md)
@@ -17,7 +16,7 @@ are excluded.
 | Samba 4.22.11 | Oct 6-7 | 239 | 24 | 27 | 0 | 0 | 290 |
 | Azure | Oct 3-7 | 206 | 26 | 54 | 3 | 1 | 290 |
 | Windows | Oct 1-3, 7 | 218 | 22 | 49 | 0 | 1 | 290 |
-| ksmbd | Sep 25, Oct 7 | 210 | 16 | 41 | 2 | 0 | 269 |
+| ksmbd | Sep 25, Oct 7-8 | 211 | 17 | 60 | 2 | 0 | 290 |
 
 These are the latest recorded outcomes from dated runs, not a new run of the
 committed checkout. The repaired scripts `103`, `116`, `157`, `171`, `216`, `251`
@@ -27,8 +26,51 @@ is not an exact committed-tree live rerun. Tests `192`, `194`, `225`, `236` and
 `275` still have pending local repairs. Failures are not necessarily server
 defects, and these focused repairs do not certify every assertion in each test.
 
-ksmbd has no recorded results for 21 committed tests, shown as `-` rather than
-skips. Test `168` was deferred on Azure and Windows for capacity safety.
+All four servers now have recorded outcomes for all 290 committed test IDs.
+Test `168` was deferred on Azure and Windows for capacity safety.
+
+## October 8 ksmbd Completion
+
+The 21 previously missing ksmbd tests were invoked in the existing isolated
+baseline fixture: **1 PASS, 1 FAIL, 19 SKIP, no new timeouts**. The results are
+merged below, bringing ksmbd to **211 PASS, 17 FAIL, 60 SKIP, 2 TIMEOUT** across
+290 IDs. The two timeouts remain September 25 observations, not new timeouts.
+
+| Tests | Result | Recorded Behavior or Prerequisite |
+| --- | --- | --- |
+| 407 | PASS | Server filesystem compression ioctl and data-integrity checks completed. |
+| 390 | FAIL | After POSIX negotiation, `chmod` on the test file returned `PermissionError: [Errno 13] Permission denied`. Test-file removal also logged permission denial; this is not a confirmed data-corruption diagnosis. |
+| 315, 320 | SKIP | `CIFS_DFS_ROOT` was not configured. |
+| 323-324, 326-333, 404 | SKIP | `CIFS_KRB5_REALM` was not configured. |
+| 355 | SKIP | The server did not advertise SMB3 directory leasing. |
+| 356 | SKIP | No `CIFS_CRED_FILE2` for a distinct server account. |
+| 379 | SKIP | A snapshot-enabled share with existing snapshots was required. |
+| 387 | SKIP | Dedicated Samba restart opt-in was disabled; the test was not adapted to restart ksmbd. |
+| 392 | SKIP | The target session had no server-interface information. |
+| 406 | SKIP | Private offload-tracing opt-in was disabled. |
+
+Missing fixtures and disabled opt-ins are not evidence that ksmbd lacks the
+underlying feature. No prerequisite was bypassed, and no expected output or test
+assertion was changed to obtain these outcomes.
+
+The runner selected only these 21 tests and the ksmbd backend, with a 600-second
+per-test limit. It used two disposable 512 MiB ext4 shares, a loopback-device-bound
+port-1445 server, and an owned `127.0.0.2:445` forwarder. Multichannel, SMB2 leases,
+and durable handles remained disabled. Host Samba was not interrupted. Global
+DFS-cache flushing, Samba restart, CIFS-client reload, and offload tracing were
+explicitly disabled. Inherited CIFS/Kerberos fixture variables were removed.
+
+All 437 archive checksums, 21 xUnit outcomes, and 103 source-file hashes were
+verified. The server, forwarder, ksmbd module, owned loops, mounts, and temporary
+credentials were removed, and recorded host/feature state was restored. The
+fixture backing storage was removed despite the test-local cleanup warning in
+`390`. No coverage counters were reset; existing mixed-backend counters do not
+support a new coverage percentage.
+
+The sealed local evidence is `results-runs/cifs-ksmbd-remaining-20261008`, with
+the ledger at `ksmbd/suite-status.tsv`. These are current working-source results,
+not an exact committed-tree rerun; helper/fixture changes remain local. The other
+269 ksmbd outcomes were retained unchanged.
 
 ## October 7 Repair Validation
 
@@ -61,7 +103,7 @@ which does not inherit the profile's port. Host Samba on `127.0.0.1:445` was
 not stopped or changed. Two temporary 512 MiB ext4 shares replaced the older
 2 GiB backing fixtures; multichannel, SMB2 leases and durable handles remained
 disabled. Test `171` therefore skipped for unavailable leasing. The other
-ksmbd matrix cells retain September 25 observations.
+previously recorded ksmbd matrix cells retain September 25 observations.
 
 Two ksmbd preparation attempts are preserved separately: the first stopped
 before tests because its safety check did not recognize `*%lo:1445`; the second
@@ -106,7 +148,7 @@ Samba network preflight. No earlier archive was overwritten or relabeled.
 	The Windows edition/build was not identified.
 - **ksmbd:** September 25 published suite at `1ebff9ed`, with multichannel,
 	SMB2 leases and durable handles disabled, overlaid with the October 7
-	seven-test final attempt described above.
+	seven-test final attempt and October 8 completion of the 21 missing IDs.
 
 The original Samba run, filtered to committed IDs, was **229 PASS, 25 FAIL,
 36 SKIP**. The nine supplemental passes replace nine skips in the latest
@@ -452,23 +494,23 @@ evidence; they are not portable repository links.
 | cifs/312 | ✅ | ✅ | ✅ | ✅ |
 | cifs/313 | ✅ | ⏭️ | ⏭️ | ⏭️ |
 | cifs/314 | ✅ | ⏭️ | ⏭️ | ⏭️ |
-| cifs/315 | ⏭️ | ⏭️ | ⏭️ | - |
+| cifs/315 | ⏭️ | ⏭️ | ⏭️ | ⏭️ |
 | cifs/316 | ✅ | ⏭️ | ⏭️ | ⏭️ |
 | cifs/317 | ❌ | ⏭️ | ⏭️ | ⏭️ |
 | cifs/319 | ✅ | ⏭️ | ⏭️ | ⏭️ |
-| cifs/320 | ✅ | ⏭️ | ⏭️ | - |
+| cifs/320 | ✅ | ⏭️ | ⏭️ | ⏭️ |
 | cifs/321 | ✅ | ⏭️ | ⏭️ | ⏭️ |
 | cifs/322 | ✅ | ⏭️ | ⏭️ | ⏭️ |
-| cifs/323 | ✅ | ⏭️ | ⏭️ | - |
-| cifs/324 | ✅ | ⏭️ | ⏭️ | - |
-| cifs/326 | ✅ | ⏭️ | ⏭️ | - |
-| cifs/327 | ✅ | ⏭️ | ⏭️ | - |
-| cifs/328 | ✅ | ⏭️ | ⏭️ | - |
-| cifs/329 | ✅ | ⏭️ | ⏭️ | - |
-| cifs/330 | ✅ | ⏭️ | ⏭️ | - |
-| cifs/331 | ✅ | ⏭️ | ⏭️ | - |
-| cifs/332 | ✅ | ⏭️ | ⏭️ | - |
-| cifs/333 | ✅ | ⏭️ | ⏭️ | - |
+| cifs/323 | ✅ | ⏭️ | ⏭️ | ⏭️ |
+| cifs/324 | ✅ | ⏭️ | ⏭️ | ⏭️ |
+| cifs/326 | ✅ | ⏭️ | ⏭️ | ⏭️ |
+| cifs/327 | ✅ | ⏭️ | ⏭️ | ⏭️ |
+| cifs/328 | ✅ | ⏭️ | ⏭️ | ⏭️ |
+| cifs/329 | ✅ | ⏭️ | ⏭️ | ⏭️ |
+| cifs/330 | ✅ | ⏭️ | ⏭️ | ⏭️ |
+| cifs/331 | ✅ | ⏭️ | ⏭️ | ⏭️ |
+| cifs/332 | ✅ | ⏭️ | ⏭️ | ⏭️ |
+| cifs/333 | ✅ | ⏭️ | ⏭️ | ⏭️ |
 | cifs/334 | ✅ | ✅ | ✅ | ✅ |
 | cifs/335 | ✅ | ❌ | ❌ | ✅ |
 | cifs/336 | ❌ | ✅ | ✅ | ✅ |
@@ -487,8 +529,8 @@ evidence; they are not portable repository links.
 | cifs/352 | ✅ | ✅ | ✅ | ✅ |
 | cifs/353 | ✅ | ✅ | ✅ | ✅ |
 | cifs/354 | ❌ | ✅ | ✅ | ❌ |
-| cifs/355 | ✅ | ⏭️ | ✅ | - |
-| cifs/356 | ✅ | ❌ | ⏭️ | - |
+| cifs/355 | ✅ | ⏭️ | ✅ | ⏭️ |
+| cifs/356 | ✅ | ❌ | ⏭️ | ⏭️ |
 | cifs/357 | ✅ | ✅ | ✅ | ✅ |
 | cifs/358 | ❌ | ❌ | ✅ | ❌ |
 | cifs/359 | ✅ | ✅ | ✅ | ✅ |
@@ -508,18 +550,18 @@ evidence; they are not portable repository links.
 | cifs/374 | ✅ | ✅ | ✅ | ✅ |
 | cifs/375 | ✅ | ✅ | ✅ | ✅ |
 | cifs/376 | ❌ | ❌ | ❌ | ✅ |
-| cifs/379 | ✅ | ⏭️ | ⏭️ | - |
+| cifs/379 | ✅ | ⏭️ | ⏭️ | ⏭️ |
 | cifs/380 | ✅ | ✅ | ❌ | ❌ |
 | cifs/381 | ✅ | ✅ | ✅ | ✅ |
 | cifs/382 | ✅ | ✅ | ✅ | ❌ |
 | cifs/383 | ✅ | ✅ | ✅ | ✅ |
 | cifs/384 | ✅ | ✅ | ✅ | ✅ |
 | cifs/386 | ✅ | ✅ | ✅ | ✅ |
-| cifs/387 | ✅ | ⏭️ | ⏭️ | - |
+| cifs/387 | ✅ | ⏭️ | ⏭️ | ⏭️ |
 | cifs/388 | ✅ | ❌ | ❌ | ❌ |
 | cifs/389 | ✅ | ✅ | ✅ | ✅ |
-| cifs/390 | ✅ | ⏭️ | ❌ | - |
-| cifs/392 | ✅ | ✅ | ✅ | - |
+| cifs/390 | ✅ | ⏭️ | ❌ | ❌ |
+| cifs/392 | ✅ | ✅ | ✅ | ⏭️ |
 | cifs/393 | ❌ | ❌ | ✅ | ✅ |
 | cifs/394 | ❌ | ✅ | ✅ | ❌ |
 | cifs/396 | ✅ | ⏭️ | ⏭️ | ⏭️ |
@@ -527,6 +569,6 @@ evidence; they are not portable repository links.
 | cifs/399 | ✅ | ✅ | ✅ | ✅ |
 | cifs/400 | ✅ | ✅ | ✅ | ✅ |
 | cifs/403 | ✅ | ✅ | ✅ | ✅ |
-| cifs/404 | ✅ | ⏭️ | ⏭️ | - |
-| cifs/406 | ✅ | ✅ | ⏭️ | - |
-| cifs/407 | ✅ | ⏭️ | ✅ | - |
+| cifs/404 | ✅ | ⏭️ | ⏭️ | ⏭️ |
+| cifs/406 | ✅ | ✅ | ⏭️ | ⏭️ |
+| cifs/407 | ✅ | ⏭️ | ✅ | ✅ |

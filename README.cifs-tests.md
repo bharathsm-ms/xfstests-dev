@@ -617,7 +617,7 @@ checkpoint; they are not yet part of the published passing-test series.
 ## Supported backends
 
 The suite has been tested against the following backends. Results through
-**2026-10-07** combine baseline runs and targeted reruns; they are not a single
+**2026-10-08** combine baseline runs and targeted reruns; they are not a single
 fresh full-suite run on every backend or a claim that all tests pass.
 
 | Backend | Latest test dates (2026) | Notes |
@@ -625,7 +625,7 @@ fresh full-suite run on every backend or a claim that all tests pass.
 | **Samba 4.22.11** | Oct 6-7 | Local Samba results with feature-specific fixtures; retained failures and skips are documented. |
 | **Azure Files** | Oct 3-7 | Combined observations from main, canary, and preproduction endpoints; capabilities depend on the endpoint and share configuration. |
 | **Windows Server** | Oct 1-3, 7 | October baseline plus targeted reruns, including repaired tests; retained failures and skips are documented. |
-| **ksmbd** | Sep 25, Oct 7 | In-tree Linux SMB server; 269 recorded results, with 21 tests missing results. Multichannel, SMB2 leases, and durable handles were disabled in the tested fixture. |
+| **ksmbd** | Sep 25, Oct 7-8 | In-tree Linux SMB server; outcomes recorded for all 290 committed test IDs. Multichannel, SMB2 leases, and durable handles were disabled in the tested fixture; missing feature fixtures and disabled opt-ins account for many skips. |
 
 See the [latest cross-server matrix](cifs-results_latest.md),
 [failure and skip reasons](cifs-results-failures-20261006.md), and
