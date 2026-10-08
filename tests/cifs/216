@@ -42,7 +42,7 @@ echo "cifs216: many files readdir OK ($count)" >> "$seqres.full"
 DIR2="$W/delduring"
 mkdir -p "$DIR2" || _fail "mkdir delduring failed"
 for i in $(seq 1 100); do
-    echo "content_$i" > "$DIR2/del_$i"
+    echo "content_$i" > "$DIR2/del_$i" || _fail "create del_$i failed"
 done
 
 # List files while concurrently deleting some
@@ -62,8 +62,10 @@ wait $DEL_PID 2>/dev/null
 surviving=0
 for i in $(seq 2 2 100); do
     if [ -f "$DIR2/del_$i" ]; then
-        got=$(cat "$DIR2/del_$i")
-        [ "$got" = "content_$i" ] || _fail "surviving file del_$i has wrong content"
+        if ! printf 'content_%s\n' "$i" | cmp - "$DIR2/del_$i" >> "$seqres.full" 2>&1; then
+            od -An -tx1 -N64 "$DIR2/del_$i" >> "$seqres.full" 2>&1
+            _fail "surviving file del_$i has wrong content"
+        fi
         surviving=$((surviving + 1))
     fi
 done

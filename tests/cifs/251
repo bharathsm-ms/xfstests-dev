@@ -191,13 +191,11 @@ MO_IDS="$STRIPPED"
 
 if _do "mount -t cifs '$TEST_DEV' '$M1' -o '$MO_IDS'" 2>>"$seqres.full"; then
     F4="$M1/$SUB/idsfromsid_file"
-    echo "idstest" > "$F4" 2>/dev/null || true
+    { echo "idstest" > "$F4"; } 2>>"$seqres.full" || _fail "create idsfromsid_file failed"
 
-    if [ -f "$F4" ]; then
-        uid_ids=$(stat -c %u "$F4")
-        gid_ids=$(stat -c %g "$F4")
-        echo "cifs251: idsfromsid uid=$uid_ids gid=$gid_ids" >> "$seqres.full"
-    fi
+    uid_ids=$(stat -c %u "$F4" 2>>"$seqres.full") || _fail "stat idsfromsid owner failed"
+    gid_ids=$(stat -c %g "$F4" 2>>"$seqres.full") || _fail "stat idsfromsid group failed"
+    echo "cifs251: idsfromsid uid=$uid_ids gid=$gid_ids" >> "$seqres.full"
 
     _do "umount '$M1'" 2>>"$seqres.full" || true
     echo "cifs251: idsfromsid OK" >> "$seqres.full"

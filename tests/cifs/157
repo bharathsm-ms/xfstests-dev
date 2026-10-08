@@ -4,22 +4,29 @@
 . ./common/preamble
 . ./common/rc
 _begin_fstest auto quick
-[ "$FSTYP" = "cifs" ] || _notrun "requires CIFS"
-[ -n "$TEST_DIR" ] || _notrun "TEST_DIR not set"
+. ./common/cifs_debug
+. ./common/cifs_test
+_cifs_test_init
+[ -n "$TEST_DEV" ] || _notrun "TEST_DEV not set"
 [ -r /proc/fs/cifs/Stats ] || _notrun "no Stats"
-[ "$(id -u)" = 0 ] || _notrun "root remount required"
+command -v python3 >/dev/null 2>&1 || _notrun "requires python3"
 
-mount_line=$(awk -v mnt="$TEST_DIR" '$2==mnt {print; exit}' /proc/mounts)
-orig_opts=$(echo "$mount_line" | awk '{print $4}')
-mount -o remount,strictsync "$TEST_DIR" || _notrun "remount failed"
-_register_cleanup "mount -o remount,${orig_opts%%,*} '$TEST_DIR' >/dev/null 2>&1 || true"
+_cifs_test_mount 'strictsync'
+_cifs_test_workspace "$CIFS_TEST_MNT"
 
-stat_before=$(grep -m1 -i 'Flush' /proc/fs/cifs/Stats | awk '{for(i=1;i<=NF;i++) if($i ~ /^[0-9]+$/){print $i; exit}}')
-echo data > "$TEST_DIR/strictsync_test.$$"
-sync "$TEST_DIR/strictsync_test.$$" 2>/dev/null || true
-fsync "$TEST_DIR/strictsync_test.$$" 2>/dev/null || true
-stat_after=$(grep -m1 -i 'Flush' /proc/fs/cifs/Stats | awk '{for(i=1;i<=NF;i++) if($i ~ /^[0-9]+$/){print $i; exit}}')
-[ -n "$stat_before" ] && [ -n "$stat_after" ] || _notrun "no flush counter"
+stat_before=$(_cifs_stat "$TEST_DEV" "Flushes:") || _notrun "no flush counter for test share"
+python3 - "$CIFS_TEST_WORK/strictsync_test" >> "$seqres.full" 2>&1 <<'PY'
+import os
+import sys
+
+with open(sys.argv[1], 'wb') as target:
+	target.write(b'data\n')
+	target.flush()
+	os.fsync(target.fileno())
+PY
+[ "$?" -eq 0 ] || _fail "strictsync write/fsync failed"
+stat_after=$(_cifs_stat "$TEST_DEV" "Flushes:") || _fail "test share flush counter disappeared"
+echo "cifs157: Flushes before=$stat_before after=$stat_after" >> "$seqres.full"
 if [ "$stat_after" -le "$stat_before" ]; then _fail "flush counter did not increase"; fi
 echo "strictsync flush OK"
 status=0; exit

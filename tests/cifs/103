@@ -22,6 +22,12 @@ _begin_fstest auto quick
 [ "$FSTYP" = "cifs" ] || _notrun "requires CIFS"
 [ -n "$TEST_DEV" ] || _notrun "TEST_DEV not set"
 [ -n "$TEST_DIR" ] || _notrun "TEST_DIR not set"
+[ -r /proc/fs/cifs/DebugData ] || _notrun "requires readable CIFS DebugData"
+
+if printf '%s\n' "$TEST_FS_MOUNT_OPTS" "$MOUNT_OPTIONS" |
+    grep -Eq '(^|[[:space:],])nosharesock([[:space:],]|$)'; then
+    _notrun "global nosharesock prevents the required sharesock baseline"
+fi
 
 _host_from_unc() { echo "$1" | sed -E 's#^//([^/]+)/.*#\1#'; }
 _share_from_unc() { echo "$1" | sed -E 's#^//[^/]+/([^/]+).*#\1#'; }

@@ -113,7 +113,7 @@ worker() {
         case $op in
             0) head -c 16 "$fname" > /dev/null 2>&1 ; rc=$? ;;
             1) printf "x" >> "$fname" 2>/dev/null ; rc=$? ;;
-            2) alt="$fname.tmp$$"; mv "$fname" "$alt" 2>/dev/null && mv "$alt" "$fname" 2>/dev/null; rc=$? ;;
+            2) alt="$fname.tmp$BASHPID"; mv "$fname" "$alt" 2>/dev/null && mv "$alt" "$fname" 2>/dev/null; rc=$? ;;
             3) rm -f "$fname" 2>/dev/null; echo "r$RANDOM" > "$fname" 2>/dev/null; rc=$? ;;
         esac
         end_ns=$(date +%s%N)
@@ -121,25 +121,25 @@ worker() {
         if [ $rc -ne 0 ]; then
             # Attempt remediation for race losses (file deleted/renamed by other worker)
             case $op in
-                0|1) echo "heal" > "$fname" 2>/dev/null; rc=0 ;;
-                2) echo "heal" > "$fname" 2>/dev/null; alt="$fname.tmp$$"; mv "$fname" "$alt" 2>/dev/null && mv "$alt" "$fname" 2>/dev/null; rc=0 ;;
-                3) echo "heal" > "$fname" 2>/dev/null; rc=0 ;;
+                0|1) echo "heal" > "$fname" 2>/dev/null; rc=$? ;;
+                2) alt="$fname.tmp$BASHPID"; echo "heal" > "$fname" 2>/dev/null && mv "$fname" "$alt" 2>/dev/null && mv "$alt" "$fname" 2>/dev/null; rc=$? ;;
+                3) echo "heal" > "$fname" 2>/dev/null; rc=$? ;;
             esac
             if [ $rc -ne 0 ]; then
                 rc_fail=$((rc_fail+1))
-                echo "RC_FAIL tag=$tag op=$op file=$(basename \"$fname\") rc=$rc dur_ms=$dur_ms rc_fail=$rc_fail" >> $seqres.full
+                echo "RC_FAIL tag=$tag op=$op file=${fname##*/} rc=$rc dur_ms=$dur_ms rc_fail=$rc_fail" >> $seqres.full
                 if [ $rc_fail -gt $RC_TOL ]; then
                     echo "FAIL_RC_EXCEEDED tag=$tag rc_fail=$rc_fail" >> $seqres.full
-                    echo FAIL > "$WROOT/FAIL"; break
+                    echo FAIL > "$WROOT/FAIL"; return 1
                 fi
             fi
         fi
         if [ $dur_ms -gt $OPMAX ]; then
             slow=$((slow+1))
-            echo "SLOW_OP tag=$tag op=$op file=$(basename \"$fname\") dur_ms=$dur_ms slow_count=$slow" >> $seqres.full
+            echo "SLOW_OP tag=$tag op=$op file=${fname##*/} dur_ms=$dur_ms slow_count=$slow" >> $seqres.full
             if [ $slow -gt $SLOW_TOL ]; then
                 echo "FAIL_SLOW_EXCEEDED tag=$tag slow_count=$slow" >> $seqres.full
-                echo FAIL > "$WROOT/FAIL"; break
+                echo FAIL > "$WROOT/FAIL"; return 1
             fi
         fi
     done
@@ -169,17 +169,18 @@ while :; do
 done
 
 # Wait cleanup
-for p in $pids; do wait $p 2>/dev/null || true; done
+worker_failed=0
+for p in $pids; do wait "$p" 2>/dev/null || worker_failed=1; done
 
-if [ -f "$WROOT/FAIL" ]; then
+if [ "$worker_failed" -ne 0 ] || [ -f "$WROOT/FAIL" ]; then
     _fail "operation exceeded ${OPMAX}ms or rc failure (see $seqres.full)"
 fi
 
 # Basic activity sanity: ensure at least some operations recorded by checking size growth or logs.
-ops_count=$(grep -c '^DONE tag=' $seqres.full 2>/dev/null || echo 0)
+ops_count=$(grep -c '^DONE tag=' "$seqres.full" 2>/dev/null || true)
 [ "$ops_count" -ge 1 ] || _fail "no worker completion markers"
-slow_total=$(grep -c '^SLOW_OP ' $seqres.full 2>/dev/null || echo 0)
-rc_fail_total=$(grep -c '^RC_FAIL ' $seqres.full 2>/dev/null || echo 0)
+slow_total=$(grep -c '^SLOW_OP ' "$seqres.full" 2>/dev/null || true)
+rc_fail_total=$(grep -c '^RC_FAIL ' "$seqres.full" 2>/dev/null || true)
 echo "cifs171: summary workers=$ops_count slow_ops=$slow_total rc_fail_ops=$rc_fail_total tol_slow=$SLOW_TOL tol_rc=$RC_TOL opmax_ms=$OPMAX" >> $seqres.full
 
 echo "Lease stress closetimeo=30 OK"

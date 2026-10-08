@@ -192,17 +192,31 @@ echo "cifs310: shared_dir: expected=$expected_files actual=$actual_files" >> "$s
     _fail "directory incomplete: expected $expected_files files, found $actual_files"
 
 # Verify content of a sample from each mount
-sample_errors=0
-for i in $(seq 1 $NMOUNTS); do
-    fname="$W/shared_dir/cifs310.$$.mount${i}_file1"
-    expected="mount${i}_file1_data"
-    got=$(cat "$fname" 2>/dev/null | tr -d '\n\r')
-    if [ "$got" != "$expected" ]; then
-        echo "cifs310: content mismatch mount $i: got='$got' want='$expected'" >> "$seqres.full"
-        sample_errors=$((sample_errors + 1))
-    fi
-done
-[ $sample_errors -eq 0 ] || _fail "directory file content: $sample_errors mismatches"
+python3 - "$W/shared_dir" "cifs310.$$" "$NMOUNTS" >> "$seqres.full" 2>&1 <<'PY'
+import os
+import sys
+
+directory, prefix, mount_count = sys.argv[1:]
+sample_errors = 0
+for mount_index in range(1, int(mount_count) + 1):
+    filename = os.path.join(directory, f'{prefix}.mount{mount_index}_file1')
+    expected = f'mount{mount_index}_file1_data\n'.encode('ascii')
+    try:
+        with open(filename, 'rb') as source:
+            observed = source.read(len(expected) + 1)
+    except OSError as error:
+        print(f'cifs310: sample read failed for mount {mount_index}: {error}')
+        sample_errors += 1
+        continue
+    if observed != expected:
+        print(f'cifs310: content mismatch mount {mount_index}: '
+              f'got={observed!r} want={expected!r}')
+        sample_errors += 1
+if sample_errors:
+    print(f'directory file content: {sample_errors} mismatches')
+    sys.exit(1)
+PY
+[ "$?" -eq 0 ] || _fail "directory file content verification failed"
 
 echo "cifs310: test2 (shared dir create) OK" >> "$seqres.full"
 

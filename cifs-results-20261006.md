@@ -1,62 +1,151 @@
-# CIFS Cross-Server Results and Commit Selection: 2026-10-06
+# CIFS Per-Test Results
 
-## Interpretation
+**Updated:** 2026-10-08 | **Results through:** 2026-10-07
 
-This is a latest-observed ledger of **305 local test IDs**, not a fresh
-cross-server run and not a claim that all 305 test sources are committed.
-It includes held local candidates so that their failures remain visible.
-An outcome applies to the source and fixture used for that attempt. Older
-Windows, Azure and ksmbd results do not validate today's repaired sources.
-SKIP is not PASS, and FAIL is not automatically a server or kernel defect.
+**Scope:** 290 committed test IDs at `bd42fe80`: 269 in the last-known remote
+revision `1ebff9ed` and 21 committed locally but not yet pushed. Untracked tests
+are excluded.
 
-P = PASS; F = FAIL; S = test-reported SKIP; T = external-runner TIMEOUT;
-D = deliberately deferred without execution; - = outside that run's inventory.
-The matrix normalizes historical NOT_RUN for test 168 to D, not S.
+[Results overview](cifs-results_latest.md)
+| [Failure and skip reasons](cifs-results-failures-20261006.md)
+| [Test catalogue](README.cifs-tests.md)
 
-| Server / Evidence Scope | PASS | FAIL | SKIP | TIMEOUT | Deferred | Total |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| Samba, Oct 6 full run plus supplement | 240 | 33 | 32 | 0 | 0 | 305 |
-| Azure, Oct 3-6 combined latest attempts | 207 | 33 | 61 | 3 | 1 | 305 |
-| Windows, Oct 1 coverage run plus Oct 3 review | 219 | 30 | 55 | 0 | 1 | 305 |
-| ksmbd, Sep 25 published suite | 209 | 17 | 41 | 2 | 0 | 269 |
+## Summary
 
-Samba uses only the latest tested server, **4.22.11**, with the Oct 6 results.
-Older Samba results remain historical and are not combined into this column.
-The original Samba 4.22.11 full run was **231 PASS, 33 FAIL, 41 SKIP**.
-Its ten-test supplement was **9 PASS, 0 FAIL, 1 SKIP**: PASS for
-`102 137 149 158 203 215 329 356 404`, SKIP for `318`. The nine passes
-replace nine earlier skips in the derived ledger, not in the saved original.
+| Server | Test Dates (2026) | ✅ Pass | ❌ Fail | ⏭️ Skip | ⏱️ Timeout | ⏸️ Deferred | Total |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Samba 4.22.11 | Oct 6-7 | 239 | 24 | 27 | 0 | 0 | 290 |
+| Azure | Oct 3-7 | 206 | 26 | 54 | 3 | 1 | 290 |
+| Windows | Oct 1-3, 7 | 218 | 22 | 49 | 0 | 1 | 290 |
+| ksmbd | Sep 25, Oct 7 | 210 | 16 | 41 | 2 | 0 | 269 |
 
-Windows uses the later Oct 1 coverage run (211 PASS, 21 FAIL, 36 SKIP,
-1 deferred), then the 48 Oct 3 candidate outcomes. The earlier functional
-run (209 PASS, 22 FAIL, 37 SKIP, 1 deferred) remains separately documented in
-[cifs-results-windows-20261001.md](cifs-results-windows-20261001.md).
-The Windows edition/build was not identified. Both published Windows runs and
-the [ksmbd run](cifs-results-ksmbd-20260925.md) used revision `1ebff9ed`.
-ksmbd had multichannel, SMB2 leases and durable handles disabled.
+These are the latest recorded outcomes from dated runs, not a new run of the
+committed checkout. The repaired scripts `103`, `116`, `157`, `171`, `216`, `251`
+and `310` are included with these reports and match their October 7 live-run
+source archives. Some live-run helper and fixture changes remain local, so this
+is not an exact committed-tree live rerun. Tests `192`, `194`, `225`, `236` and
+`275` still have pending local repairs. Failures are not necessarily server
+defects, and these focused repairs do not certify every assertion in each test.
 
-Azure combines the latest observed outcome for each test across the main Azure
-Files endpoint and the later canary and preproduction probes. "Azure Primary"
-previously meant the main endpoint, not a different server product. Its ledger
-contains 321 actual invocations including retries; the two additional endpoints
-ran four tests each. This combined column is not a single-endpoint full-suite run.
-For IDs not rerun on those endpoints, the main endpoint's result is retained.
-Preproduction supplies the latest TIMEOUT for `275` and FAIL for `385`, replacing
-the main endpoint's SKIPs. Those failures are not attributed to the main endpoint.
-The endpoint-specific observations are preserved below.
+ksmbd has no recorded results for 21 committed tests, shown as `-` rather than
+skips. Test `168` was deferred on Azure and Windows for capacity safety.
 
-Test 168 remains deferred for capacity safety on both Azure and Windows. The
-older [Azure published-suite report](cifs-results-azure-20260924.md) and
-[September Samba ledger](cifs-results-20260917.md) are retained as history.
+## October 7 Repair Validation
 
-## Selected for This Commit
+The latest seven-test validation used unchanged test sources and expected
+outputs on Samba 4.22.11, the main Azure Files endpoint, the published Windows
+endpoint and a temporary ksmbd fixture. **28 latest outcomes: 18 PASS, 8 FAIL,
+2 SKIP, no timeouts.** These results are merged into the complete matrix.
 
-**19 tests: five repairs and fourteen additions.** Every selected script and
-its expected output matches the SHA-256 recorded for a passing Oct 6 Samba
-attempt. Selection also considers assertions, prerequisite gates, bounded
-operations, cleanup and helper dependencies; a PASS alone is insufficient.
-This is a conservative local commit selection, not upstream approval or an
-all-server compatibility certification.
+| Test | Samba | Azure | Windows | ksmbd |
+| --- | --- | --- | --- | --- |
+| cifs/103 | ✅ | ✅ | ✅ | ✅ |
+| cifs/116 | ✅ | ⏭️ | ✅ | ✅ |
+| cifs/157 | ✅ | ✅ | ✅ | ✅ |
+| cifs/171 | ❌ | ✅ | ❌ | ⏭️ |
+| cifs/216 | ✅ | ❌ | ❌ | ✅ |
+| cifs/251 | ✅ | ✅ | ❌ | ✅ |
+| cifs/310 | ❌ | ❌ | ❌ | ✅ |
+
+Five cells changed: `103` FAIL to PASS on Samba and Windows; `157` FAIL to PASS
+on ksmbd; `116` FAIL to SKIP on Azure; and `171` PASS to FAIL on Windows.
+The latter emitted stale-file-handle diagnostics despite its final OK line.
+Skips are not passes. Test `103` used a per-test profile without global
+`nosharesock`, allowing both socket assertions to execute; other options were
+preserved. The additional repairs are described in the
+[test-issue review](cifs-results-failures-20261006.md#test-issue-review).
+
+ksmbd-tools 3.5.3 used a loopback-device-bound listener on port 1445, with a
+temporary `127.0.0.2:445` TCP forwarder for `157`'s test-owned mount helper,
+which does not inherit the profile's port. Host Samba on `127.0.0.1:445` was
+not stopped or changed. Two temporary 512 MiB ext4 shares replaced the older
+2 GiB backing fixtures; multichannel, SMB2 leases and durable handles remained
+disabled. Test `171` therefore skipped for unavailable leasing. The other
+ksmbd matrix cells retain September 25 observations.
+
+Two ksmbd preparation attempts are preserved separately: the first stopped
+before tests because its safety check did not recognize `*%lo:1445`; the second
+ran seven tests but `157` failed to connect without the default-port forwarder.
+The final seven-test attempt supplied all ksmbd results above. Its daemon,
+forwarder, module, lock, mounts, loops and temporary credentials were removed.
+No test assertion was changed between attempts.
+
+Each test ran in a private mount/PID namespace with a 600-second limit.
+Test/helper source hashes and xUnit records were verified. Host settings,
+services, firewall, loop devices and feature state matched the initial audit;
+owned runtime and mounts were cleaned up. The loaded client build was unchanged.
+Counters were captured without reset; they now include mixed-backend activity,
+so no new coverage percentage or Samba-only attribution is claimed.
+
+Fresh failure reasons are in the
+[failure report](cifs-results-failures-20261006.md#test-issue-review). The latest
+sealed sources are `results-runs/cifs-repaired-seven-20261007` (Samba, Azure,
+Windows) and `results-runs/cifs-repaired-seven-ksmbd-20261007-final` (ksmbd).
+The stopped setup and intermediate ksmbd batch remain in the corresponding
+`cifs-repaired-seven-ksmbd-20261007` and `-retry` directories.
+
+The earlier five-test validation (15 executions: 8 PASS, 7 FAIL) remains sealed
+in `results-runs/cifs-test-fixes-20261007` and
+`results-runs/cifs-test-fixes-samba-20261007`, including its initial unsuccessful
+Samba network preflight. No earlier archive was overwritten or relabeled.
+
+<details>
+<summary>Run notes and evidence</summary>
+
+### Server Runs
+
+- **Samba 4.22.11:** October 6 full run plus nine supplemental passes:
+	`102 137 149 158 203 215 329 356 404`, then the October 7 seven-test repair
+	validation above. No older Samba version is included.
+- **Azure:** Latest result per test across the main endpoint and later canary
+	and preproduction probes, not a single-endpoint suite run. Preproduction
+	supplies the timeout for `275`, replacing the main endpoint's skip. The seven
+	October 7 repair tests used the main endpoint.
+- **Windows:** The later October 1 coverage run plus the October 3 review and
+	the October 7 seven-test repair validation.
+	The Windows edition/build was not identified.
+- **ksmbd:** September 25 published suite at `1ebff9ed`, with multichannel,
+	SMB2 leases and durable handles disabled, overlaid with the October 7
+	seven-test final attempt described above.
+
+The original Samba run, filtered to committed IDs, was **229 PASS, 25 FAIL,
+36 SKIP**. The nine supplemental passes replace nine skips in the latest
+results, not in the saved original run.
+
+The Windows coverage run recorded **211 PASS, 21 FAIL, 36 SKIP, 1 deferred**
+before the October 3 review. The earlier functional run recorded **209 PASS,
+22 FAIL, 37 SKIP, 1 deferred** and remains separately documented in the
+[Windows report](cifs-results-windows-20261001.md). Both published Windows runs
+used revision `1ebff9ed`.
+
+### Source and Fixture Limits
+
+- Samba credential tests `158`, `203` and `356` passed with leases disabled
+	to avoid share-mode cleanup errors. Lease-enabled cleanup is not confirmed fixed.
+- Azure's failure for `356` used older, same-credential source. The repaired
+	distinct-credential version passed on Samba but has not been rerun on Azure.
+- Windows, Azure and ksmbd passes for `215` predate its remount repair.
+- Aggregate coverage is omitted: saved counters include excluded tests and
+	fixture activity, so they cannot be labeled committed-only coverage.
+
+The five earlier pending repairs remain unresolved and were not rerun on October 7:
+
+| Test | Open Issue |
+| --- | --- |
+| 192 | Samba passes, but current Azure reconnect failure and historical Windows/ksmbd failures need attribution. |
+| 194 | Oversized-password helper negative control still fails. |
+| 225 | Reparse behavior fails on tested Windows paths; no supported cross-server resolution. |
+| 236 | PASS on Samba/Azure, but registered cache plus successful reread does not assert actual FS-Cache disk use. |
+| 275 | Unresolved directory-cache/lease assertions; preproduction also records a timeout. |
+
+### Committed Test Changes
+
+Commit `028c3dc6` contains **19 tests: five repairs and fourteen additions**.
+Every selected script and expected output matches the SHA-256 recorded for
+a passing October 6 Samba attempt. Selection also considered assertions,
+prerequisite gates, bounded operations, cleanup and helper dependencies;
+a PASS alone is insufficient. This is not upstream approval or an all-server
+compatibility certification.
 
 | Test | Change | Validated Behavior / Limit |
 | --- | --- | --- |
@@ -80,23 +169,22 @@ all-server compatibility certification.
 | 404 | Add | Positive cruid, ticketless-UID denial and nonexistent-user rejection. |
 | 406 | Add | Private tracing verifies decryption offload and disabled/below-threshold controls; also PASS on Azure. |
 
-The commit includes the restart/cleanup support in common/cifs_test, each new
+The commit includes restart/cleanup support in common/cifs_test, each new
 expected-output file and only the selected additions to the group registry.
-Other pending helper, harness, README and runner changes are not included.
-No test assertions were changed during this commit-selection review.
+Other pending helper, harness, README and runner changes were not included.
+No test assertions were changed during the commit-selection review.
+
+Tests already committed before that selection, including `315`, `320`, `332`,
+`355`, `365`, `390`, `392`, `403` and `407`, were not new additions in that commit.
+Their matrix outcomes remain visible, including historical failures and skips.
 
 ### Fixture Requirements
 
 Credential tests 158/203/356 require a separate same-domain server account in
 `CIFS_CRED_FILE2`, not a copy of the primary account. Tests 203/356 additionally
-require a dedicated non-root `CIFS_MULTIUSER_UID`. The successful Samba
-credential fixture disabled leases because lease-enabled cleanup produced
-Samba share-mode errors. That cleanup problem is not claimed fixed.
-
-The Azure F for 356 is an older source using the same server credentials for
-both UIDs, for which the separate-session assertion was inappropriate. The
-new distinct-credential version passed Samba only; it was not rerun on Azure.
-Historical Windows/Azure/ksmbd passes for 215 predate its remount repair.
+require a dedicated non-root `CIFS_MULTIUSER_UID`. The Azure failure for 356
+used the same credentials for both UIDs, for which the separate-session
+assertion was inappropriate; it does not validate the repaired source.
 
 Kerberos tests require a working KDC/upcall setup, dedicated credential UIDs
 and private discoverable caches. Test 329 needs `CIFS_KRB5_SECOND_UID` and
@@ -112,401 +200,333 @@ payload needs a trailing NUL byte. Test 244 needs Linux file leases enabled;
 Test 387 requires `CIFS_ALLOW_SAMBA_RESTART=yes` on a dedicated loopback server;
 set `CIFS_SAMBA_CONTROL` for an owned controller, otherwise it uses the host
 smbd service. Test 406 requires `CIFS_ALLOW_OFFLOAD_TRACE=yes`, function tracing
-and an isolated client. These opt-ins are not enabled by this commit.
+and an isolated client. These opt-ins were not enabled by the commit.
 
-### Held Pending Changes
+### Azure Directory-Lease Probes
 
-These **20 pending test changes are excluded**, without changing their saved
-outcomes or deleting their working-tree files. A held failure can still be a
-useful reproducer; attribution and submission readiness are separate questions.
-
-| Tests | Reason to Hold |
-| --- | --- |
-| 192 | Samba passes, but current Azure reconnect failure and historical Windows/ksmbd failures need attribution. |
-| 194 | Oversized-password helper negative control still fails. |
-| 225, 378, 402 | Reparse behavior fails on tested Windows paths; no supported cross-server resolution. |
-| 236 | PASS on Samba/Azure, but registered cache plus successful reread does not assert actual FS-Cache disk use. |
-| 275, 345, 385 | Unresolved directory-cache/lease assertions; preproduction also records timeout/failure. |
-| 318 | No positive short-TTL validation; standard Samba symlink referrals return fixed 600 seconds. |
-| 325 | Cipher parser returns a name but test expects numeric hexadecimal IDs. |
-| 343 | Duplicates basic lease acquisition/release already covered by repaired 244; consolidate before adding. |
-| 349 | F_GETLK conflict/type assertion failures need isolation. |
-| 360, 395 | ACL/mode round-trip failures unresolved. |
-| 377 | Module-reload path unvalidated; installed and instrumented loaded modules differ. |
-| 391 | Direct systemctl restart bypasses the private-server controller. |
-| 397 | Latest dedicated Samba recovery run fails, despite an earlier pass. |
-| 401 | Xattr create/replace assumptions and negative-control failures unresolved. |
-| 405 | Samba and Windows pass; Azure open-file worker fails during channel resize. |
-
-Tests already committed before this selection, including 315, 320, 332, 355,
-365, 390, 392, 403 and 407, are not new additions in this commit. Their matrix
-outcomes remain visible, including historical failures and skips.
-
-## Azure Directory-Lease Probes
-
-These four-test targets ran after the main endpoint's ledger on Oct 6. Their
-latest observations are included in the combined Azure column; this table
-preserves the endpoint-specific results. Neither probe is a full-suite run.
+Only the two committed IDs from the October 6 probes are shown:
 
 | Test | Canary | Preproduction |
 | --- | --- | --- |
-| cifs/275 | S | T |
-| cifs/345 | S | S |
-| cifs/355 | S | S |
-| cifs/385 | S | F |
+| cifs/275 | ⏭️ | ⏱️ |
+| cifs/355 | ⏭️ | ⏭️ |
 
-Canary skipped all four because directory leasing was not advertised.
-Preproduction 345/355 skipped because reusable enumeration caching was not
-observed; 275 timed out after the 600-second limit plus termination grace
-(630.5 seconds); 385 observed no expected lease break. Preproduction did
-exercise lease-invalidation code, so its skips are not proof of absent support.
+Canary did not advertise directory leasing. Preproduction `355` did not
+observe reusable enumeration caching; `275` timed out after 630.5 seconds,
+including termination grace. Preproduction exercised lease-invalidation code,
+so its skip is not proof of absent support.
 
-## Coverage Scope
+### Evidence Sources
 
-All numbers below measure the Linux CIFS client, not server implementation
-coverage: 31,508 lines, 1,179 functions and 22,392 branches across 47 reportable
-C sources / 48 GCOV objects. Headers and exception branches are excluded.
-
-| Measurement | Lines | Functions | Branches |
-| --- | ---: | ---: | ---: |
-| Samba Oct 6 fresh | 17,721 (56.24%) | 843 | 7,830 |
-| Samba after no-reset supplement | 18,052 (57.29%) | 852 | 8,056 |
-| Azure main endpoint, before additional probes | 15,659 (49.70%) | 753 | 6,900 |
-| Azure combined endpoints, cumulative | 16,100 (51.10%) | 769 | 7,107 |
-| Windows Oct 1 independent coverage run | 15,918 (50.52%) | 763 | 6,891 |
-
-Samba gained 331 unique lines relative to the preserved fresh baseline,
-including fixture/debug/audit and failed/skipped attempts. The original
-zero-based capture was preserved; the supplement did not reset counters,
-change Samba/kernel/module/dialect or merge historical/generic/other-server
-hits. The full suite includes tests with their own mount-option choices;
-the unchanged SMB 3.1.1 claim applies to the supplemental fixture.
-Azure's 51.10% is cumulative across its three endpoints, not standalone
-preproduction coverage. These measurements must not be summed or unioned into
-a new reported measurement. No live tests or coverage operations were run
-during this documentation/commit review.
-
-## Evidence Provenance
-
-Saved raw evidence is intentionally local-only and is not committed. The
-paths below are provenance identifiers, not portable repository links.
-Credentials, profiles, raw logs, GCOV archives and build artifacts are excluded.
+Raw archives remain local and uncommitted. These paths identify the saved
+evidence; they are not portable repository links.
 
 - Samba base: `results-runs/samba422-fresh-cifs-20261006-retry/suite-status.tsv`.
-- Samba overlay: `results-runs/samba422-supplement-final-20261006/suite-status.tsv`.
-- Matching test/output hashes: each Samba root's `source-sha256.json`.
-- Azure baseline (main endpoint): `results-runs/azure-cifs-multiuser-leases-20261006/latest-cifs-status.tsv`.
-- Windows base: `results-runs/cifs-windows-coverage-20261001.KJqXtj7R/suite-status.tsv`.
-- Windows overlay: `results-runs/local-tests-review-20261003/matrix.tsv`.
-- ksmbd: reconciled complete lists in [cifs-results-ksmbd-20260925.md](cifs-results-ksmbd-20260925.md).
+- Samba supplement: `results-runs/samba422-supplement-final-20261006/suite-status.tsv`.
+- Test/output hashes: each Samba archive's `source-sha256.json`.
+- Azure main: `results-runs/azure-cifs-multiuser-leases-20261006/latest-cifs-status.tsv`.
 - Azure probes: `results-runs/azure-canary-directory-leases-20261006` and `results-runs/azure-preprod-directory-leases-20261006`, each with its saved suite status and report.
+- Windows base: `results-runs/cifs-windows-coverage-20261001.KJqXtj7R/suite-status.tsv`.
+- Windows review: `results-runs/local-tests-review-20261003/matrix.tsv`.
+- October 7 repair validation: `results-runs/cifs-test-fixes-20261007/{azure,windows}/suite-status.tsv` and `results-runs/cifs-test-fixes-samba-20261007/samba/suite-status.tsv`. Each archive includes source hashes, raw output, cleanup audits and `SHA256SUMS`.
+- ksmbd: complete lists in the [September 25 report](cifs-results-ksmbd-20260925.md).
+
+</details>
+
+**Key:** ✅ pass, ❌ fail, ⏭️ skip, ⏱️ timeout, ⏸️ deferred (not run),
+`-` = no recorded result. Skips and deferrals are not passes.
 
 ## Complete Per-Test Matrix
 
 | Test | Samba | Azure | Windows | ksmbd |
 | --- | --- | --- | --- | --- |
-| cifs/001 | P | F | P | P |
-| cifs/100 | P | P | P | P |
-| cifs/101 | P | P | P | P |
-| cifs/102 | P | P | S | P |
-| cifs/103 | F | P | F | P |
-| cifs/104 | P | P | P | P |
-| cifs/105 | P | P | P | S |
-| cifs/106 | P | P | P | F |
-| cifs/107 | P | P | P | S |
-| cifs/108 | P | P | P | F |
-| cifs/109 | P | P | P | P |
-| cifs/110 | S | S | S | S |
-| cifs/111 | P | S | P | P |
-| cifs/112 | P | P | P | P |
-| cifs/113 | P | P | P | P |
-| cifs/114 | P | P | P | P |
-| cifs/115 | P | P | P | P |
-| cifs/116 | P | F | P | P |
-| cifs/117 | P | P | P | P |
-| cifs/118 | P | P | P | P |
-| cifs/119 | P | P | P | P |
-| cifs/120 | P | F | P | P |
-| cifs/121 | P | P | P | P |
-| cifs/122 | P | P | P | F |
-| cifs/123 | F | F | P | P |
-| cifs/124 | P | P | P | P |
-| cifs/125 | P | P | P | F |
-| cifs/126 | P | F | P | P |
-| cifs/127 | P | P | P | P |
-| cifs/128 | P | P | P | P |
-| cifs/129 | P | P | P | P |
-| cifs/130 | P | P | P | P |
-| cifs/131 | P | P | P | P |
-| cifs/132 | P | P | P | P |
-| cifs/133 | F | P | P | P |
-| cifs/134 | S | S | S | S |
-| cifs/135 | P | P | P | P |
-| cifs/136 | P | P | P | P |
-| cifs/137 | P | P | P | S |
-| cifs/138 | P | P | P | P |
-| cifs/139 | P | P | P | P |
-| cifs/140 | P | P | P | P |
-| cifs/141 | P | P | P | P |
-| cifs/142 | P | P | P | P |
-| cifs/143 | P | P | P | P |
-| cifs/144 | P | P | P | P |
-| cifs/145 | P | P | P | P |
-| cifs/146 | P | P | F | P |
-| cifs/147 | P | P | P | T |
-| cifs/148 | F | P | P | P |
-| cifs/149 | P | S | S | S |
-| cifs/150 | P | P | P | P |
-| cifs/151 | F | P | P | P |
-| cifs/152 | P | F | P | T |
-| cifs/153 | P | P | P | P |
-| cifs/154 | P | P | P | P |
-| cifs/155 | P | P | P | P |
-| cifs/156 | P | P | P | P |
-| cifs/157 | P | P | P | F |
-| cifs/158 | P | S | S | S |
-| cifs/159 | P | P | P | P |
-| cifs/160 | P | P | P | P |
-| cifs/161 | P | P | P | P |
-| cifs/162 | P | P | P | P |
-| cifs/163 | S | S | S | S |
-| cifs/164 | P | F | P | P |
-| cifs/165 | P | P | P | P |
-| cifs/166 | F | P | P | S |
-| cifs/167 | F | S | P | S |
-| cifs/168 | S | D | D | S |
-| cifs/169 | P | P | P | P |
-| cifs/170 | F | P | P | S |
-| cifs/171 | F | P | P | S |
-| cifs/172 | S | S | P | S |
-| cifs/173 | P | P | P | P |
-| cifs/174 | P | P | P | P |
-| cifs/175 | P | P | P | P |
-| cifs/176 | S | S | S | S |
-| cifs/177 | P | P | P | S |
-| cifs/178 | P | F | S | P |
-| cifs/179 | F | F | P | P |
-| cifs/181 | S | S | S | S |
-| cifs/182 | P | P | P | P |
-| cifs/183 | S | P | P | P |
-| cifs/184 | P | P | P | P |
-| cifs/185 | S | S | S | S |
-| cifs/186 | P | P | P | P |
-| cifs/187 | P | P | P | P |
-| cifs/188 | S | P | P | P |
-| cifs/189 | S | S | S | S |
-| cifs/190 | P | P | P | P |
-| cifs/191 | F | F | F | S |
-| cifs/192 | P | F | F | F |
-| cifs/193 | P | P | P | P |
-| cifs/194 | F | F | F | F |
-| cifs/195 | P | P | P | P |
-| cifs/196 | P | P | P | P |
-| cifs/197 | S | S | S | S |
-| cifs/198 | P | P | F | F |
-| cifs/199 | P | P | P | P |
-| cifs/200 | P | P | P | P |
-| cifs/201 | P | P | P | P |
-| cifs/202 | P | P | P | P |
-| cifs/203 | P | S | S | S |
-| cifs/206 | P | F | S | P |
-| cifs/207 | F | F | P | P |
-| cifs/208 | P | P | P | P |
-| cifs/209 | P | P | P | P |
-| cifs/210 | P | P | P | P |
-| cifs/211 | P | P | P | P |
-| cifs/212 | P | P | P | P |
-| cifs/213 | P | P | P | P |
-| cifs/214 | P | P | P | P |
-| cifs/215 | P | P | P | P |
-| cifs/216 | P | F | F | P |
-| cifs/217 | P | P | P | P |
-| cifs/218 | P | P | P | P |
-| cifs/219 | P | P | P | P |
-| cifs/220 | S | S | S | S |
-| cifs/221 | F | P | F | P |
-| cifs/222 | S | P | P | P |
-| cifs/223 | P | P | P | P |
-| cifs/224 | S | S | S | S |
-| cifs/225 | S | F | F | S |
-| cifs/226 | P | S | P | P |
-| cifs/227 | P | S | P | P |
-| cifs/228 | P | P | P | P |
-| cifs/229 | S | S | S | S |
-| cifs/230 | P | P | P | P |
-| cifs/231 | P | P | P | P |
-| cifs/232 | P | F | P | S |
-| cifs/233 | P | S | P | P |
-| cifs/234 | S | S | S | S |
-| cifs/235 | P | P | P | P |
-| cifs/236 | P | P | P | P |
-| cifs/237 | P | P | P | P |
-| cifs/238 | F | F | F | F |
-| cifs/239 | P | P | P | P |
-| cifs/240 | S | S | S | S |
-| cifs/241 | P | P | P | P |
-| cifs/242 | P | P | P | P |
-| cifs/243 | P | P | P | P |
-| cifs/244 | P | P | S | S |
-| cifs/245 | P | P | P | P |
-| cifs/246 | P | P | P | P |
-| cifs/247 | S | P | P | P |
-| cifs/248 | S | S | S | S |
-| cifs/249 | P | P | P | P |
-| cifs/250 | P | P | P | P |
-| cifs/251 | P | P | F | P |
-| cifs/252 | S | S | S | S |
-| cifs/253 | S | P | P | P |
-| cifs/254 | P | S | S | P |
-| cifs/255 | P | S | P | P |
-| cifs/256 | P | T | P | P |
-| cifs/257 | P | P | P | P |
-| cifs/258 | P | P | P | P |
-| cifs/259 | P | P | P | P |
-| cifs/260 | P | P | P | P |
-| cifs/261 | P | P | P | P |
-| cifs/262 | P | P | P | P |
-| cifs/263 | P | P | P | P |
-| cifs/264 | P | P | P | P |
-| cifs/265 | P | P | P | P |
-| cifs/266 | F | P | P | P |
-| cifs/267 | P | P | P | P |
-| cifs/268 | P | P | P | P |
-| cifs/269 | P | P | P | P |
-| cifs/270 | P | P | P | P |
-| cifs/271 | P | P | P | P |
-| cifs/272 | P | P | P | P |
-| cifs/273 | P | P | P | P |
-| cifs/274 | P | P | P | P |
-| cifs/275 | F | T | F | P |
-| cifs/276 | P | P | P | P |
-| cifs/277 | P | P | P | P |
-| cifs/278 | P | P | P | P |
-| cifs/279 | P | P | P | P |
-| cifs/280 | P | P | P | P |
-| cifs/281 | S | P | P | P |
-| cifs/282 | P | P | P | P |
-| cifs/283 | P | P | P | P |
-| cifs/284 | P | P | P | P |
-| cifs/285 | P | P | P | P |
-| cifs/286 | P | P | P | P |
-| cifs/287 | P | P | P | P |
-| cifs/288 | P | P | P | P |
-| cifs/289 | S | S | S | S |
-| cifs/290 | P | P | P | P |
-| cifs/291 | P | P | P | P |
-| cifs/292 | P | P | P | P |
-| cifs/293 | P | P | P | P |
-| cifs/294 | P | P | P | P |
-| cifs/295 | P | P | P | P |
-| cifs/296 | P | P | P | P |
-| cifs/297 | S | P | P | P |
-| cifs/298 | P | P | P | P |
-| cifs/299 | P | P | P | P |
-| cifs/300 | P | P | P | P |
-| cifs/301 | P | P | P | P |
-| cifs/302 | P | P | P | P |
-| cifs/303 | P | P | P | P |
-| cifs/304 | P | P | F | P |
-| cifs/305 | P | P | P | P |
-| cifs/306 | P | P | P | P |
-| cifs/307 | P | P | P | P |
-| cifs/308 | P | P | P | P |
-| cifs/310 | F | F | F | P |
-| cifs/311 | P | T | P | P |
-| cifs/312 | P | P | P | P |
-| cifs/313 | P | S | S | S |
-| cifs/314 | P | S | S | S |
-| cifs/315 | S | S | S | - |
-| cifs/316 | P | S | S | S |
-| cifs/317 | F | S | S | S |
-| cifs/318 | S | S | S | - |
-| cifs/319 | P | S | S | S |
-| cifs/320 | P | S | S | - |
-| cifs/321 | P | S | S | S |
-| cifs/322 | P | S | S | S |
-| cifs/323 | P | S | S | - |
-| cifs/324 | P | S | S | - |
-| cifs/325 | F | S | S | - |
-| cifs/326 | P | S | S | - |
-| cifs/327 | P | S | S | - |
-| cifs/328 | P | S | S | - |
-| cifs/329 | P | S | S | - |
-| cifs/330 | P | S | S | - |
-| cifs/331 | P | S | S | - |
-| cifs/332 | P | S | S | - |
-| cifs/333 | P | S | S | - |
-| cifs/334 | P | P | P | P |
-| cifs/335 | P | F | F | P |
-| cifs/336 | F | P | P | P |
-| cifs/337 | P | P | P | P |
-| cifs/338 | P | P | P | P |
-| cifs/339 | P | P | P | P |
-| cifs/340 | P | P | P | P |
-| cifs/341 | P | F | F | F |
-| cifs/342 | P | P | P | P |
-| cifs/343 | P | P | S | - |
-| cifs/344 | P | P | P | P |
-| cifs/345 | F | S | F | - |
-| cifs/346 | P | P | P | P |
-| cifs/347 | P | P | P | F |
-| cifs/348 | P | P | F | P |
-| cifs/349 | F | F | F | - |
-| cifs/350 | P | P | P | P |
-| cifs/351 | P | F | F | P |
-| cifs/352 | P | P | P | P |
-| cifs/353 | P | P | P | P |
-| cifs/354 | F | P | P | F |
-| cifs/355 | P | S | P | - |
-| cifs/356 | P | F | S | - |
-| cifs/357 | P | P | P | P |
-| cifs/358 | F | F | P | F |
-| cifs/359 | P | P | P | P |
-| cifs/360 | F | F | F | - |
-| cifs/361 | P | P | P | P |
-| cifs/362 | P | P | P | P |
-| cifs/363 | P | P | P | P |
-| cifs/364 | P | P | P | P |
-| cifs/365 | P | P | P | P |
-| cifs/366 | P | P | P | P |
-| cifs/367 | P | P | P | P |
-| cifs/368 | P | P | P | P |
-| cifs/369 | P | P | P | P |
-| cifs/370 | P | P | P | P |
-| cifs/371 | P | P | P | P |
-| cifs/372 | P | P | P | P |
-| cifs/373 | P | P | P | P |
-| cifs/374 | P | P | P | P |
-| cifs/375 | P | P | P | P |
-| cifs/376 | F | F | F | P |
-| cifs/377 | S | S | S | - |
-| cifs/378 | S | S | F | - |
-| cifs/379 | P | S | S | - |
-| cifs/380 | P | P | F | F |
-| cifs/381 | P | P | P | P |
-| cifs/382 | P | P | P | F |
-| cifs/383 | P | P | P | P |
-| cifs/384 | P | P | P | P |
-| cifs/385 | F | F | F | - |
-| cifs/386 | P | P | P | P |
-| cifs/387 | P | S | S | - |
-| cifs/388 | P | F | F | F |
-| cifs/389 | P | P | P | P |
-| cifs/390 | P | S | F | - |
-| cifs/391 | S | S | S | - |
-| cifs/392 | P | P | P | - |
-| cifs/393 | F | F | P | P |
-| cifs/394 | F | P | P | F |
-| cifs/395 | F | F | F | - |
-| cifs/396 | P | S | S | S |
-| cifs/397 | F | S | S | - |
-| cifs/398 | P | P | P | P |
-| cifs/399 | P | P | P | P |
-| cifs/400 | P | P | P | P |
-| cifs/401 | F | F | F | - |
-| cifs/402 | S | S | F | - |
-| cifs/403 | P | P | P | P |
-| cifs/404 | P | S | S | - |
-| cifs/405 | P | F | P | - |
-| cifs/406 | P | P | S | - |
-| cifs/407 | P | S | P | - |
+| cifs/001 | ✅ | ❌ | ✅ | ✅ |
+| cifs/100 | ✅ | ✅ | ✅ | ✅ |
+| cifs/101 | ✅ | ✅ | ✅ | ✅ |
+| cifs/102 | ✅ | ✅ | ⏭️ | ✅ |
+| cifs/103 | ✅ | ✅ | ✅ | ✅ |
+| cifs/104 | ✅ | ✅ | ✅ | ✅ |
+| cifs/105 | ✅ | ✅ | ✅ | ⏭️ |
+| cifs/106 | ✅ | ✅ | ✅ | ❌ |
+| cifs/107 | ✅ | ✅ | ✅ | ⏭️ |
+| cifs/108 | ✅ | ✅ | ✅ | ❌ |
+| cifs/109 | ✅ | ✅ | ✅ | ✅ |
+| cifs/110 | ⏭️ | ⏭️ | ⏭️ | ⏭️ |
+| cifs/111 | ✅ | ⏭️ | ✅ | ✅ |
+| cifs/112 | ✅ | ✅ | ✅ | ✅ |
+| cifs/113 | ✅ | ✅ | ✅ | ✅ |
+| cifs/114 | ✅ | ✅ | ✅ | ✅ |
+| cifs/115 | ✅ | ✅ | ✅ | ✅ |
+| cifs/116 | ✅ | ⏭️ | ✅ | ✅ |
+| cifs/117 | ✅ | ✅ | ✅ | ✅ |
+| cifs/118 | ✅ | ✅ | ✅ | ✅ |
+| cifs/119 | ✅ | ✅ | ✅ | ✅ |
+| cifs/120 | ✅ | ❌ | ✅ | ✅ |
+| cifs/121 | ✅ | ✅ | ✅ | ✅ |
+| cifs/122 | ✅ | ✅ | ✅ | ❌ |
+| cifs/123 | ❌ | ❌ | ✅ | ✅ |
+| cifs/124 | ✅ | ✅ | ✅ | ✅ |
+| cifs/125 | ✅ | ✅ | ✅ | ❌ |
+| cifs/126 | ✅ | ❌ | ✅ | ✅ |
+| cifs/127 | ✅ | ✅ | ✅ | ✅ |
+| cifs/128 | ✅ | ✅ | ✅ | ✅ |
+| cifs/129 | ✅ | ✅ | ✅ | ✅ |
+| cifs/130 | ✅ | ✅ | ✅ | ✅ |
+| cifs/131 | ✅ | ✅ | ✅ | ✅ |
+| cifs/132 | ✅ | ✅ | ✅ | ✅ |
+| cifs/133 | ❌ | ✅ | ✅ | ✅ |
+| cifs/134 | ⏭️ | ⏭️ | ⏭️ | ⏭️ |
+| cifs/135 | ✅ | ✅ | ✅ | ✅ |
+| cifs/136 | ✅ | ✅ | ✅ | ✅ |
+| cifs/137 | ✅ | ✅ | ✅ | ⏭️ |
+| cifs/138 | ✅ | ✅ | ✅ | ✅ |
+| cifs/139 | ✅ | ✅ | ✅ | ✅ |
+| cifs/140 | ✅ | ✅ | ✅ | ✅ |
+| cifs/141 | ✅ | ✅ | ✅ | ✅ |
+| cifs/142 | ✅ | ✅ | ✅ | ✅ |
+| cifs/143 | ✅ | ✅ | ✅ | ✅ |
+| cifs/144 | ✅ | ✅ | ✅ | ✅ |
+| cifs/145 | ✅ | ✅ | ✅ | ✅ |
+| cifs/146 | ✅ | ✅ | ❌ | ✅ |
+| cifs/147 | ✅ | ✅ | ✅ | ⏱️ |
+| cifs/148 | ❌ | ✅ | ✅ | ✅ |
+| cifs/149 | ✅ | ⏭️ | ⏭️ | ⏭️ |
+| cifs/150 | ✅ | ✅ | ✅ | ✅ |
+| cifs/151 | ❌ | ✅ | ✅ | ✅ |
+| cifs/152 | ✅ | ❌ | ✅ | ⏱️ |
+| cifs/153 | ✅ | ✅ | ✅ | ✅ |
+| cifs/154 | ✅ | ✅ | ✅ | ✅ |
+| cifs/155 | ✅ | ✅ | ✅ | ✅ |
+| cifs/156 | ✅ | ✅ | ✅ | ✅ |
+| cifs/157 | ✅ | ✅ | ✅ | ✅ |
+| cifs/158 | ✅ | ⏭️ | ⏭️ | ⏭️ |
+| cifs/159 | ✅ | ✅ | ✅ | ✅ |
+| cifs/160 | ✅ | ✅ | ✅ | ✅ |
+| cifs/161 | ✅ | ✅ | ✅ | ✅ |
+| cifs/162 | ✅ | ✅ | ✅ | ✅ |
+| cifs/163 | ⏭️ | ⏭️ | ⏭️ | ⏭️ |
+| cifs/164 | ✅ | ❌ | ✅ | ✅ |
+| cifs/165 | ✅ | ✅ | ✅ | ✅ |
+| cifs/166 | ❌ | ✅ | ✅ | ⏭️ |
+| cifs/167 | ❌ | ⏭️ | ✅ | ⏭️ |
+| cifs/168 | ⏭️ | ⏸️ | ⏸️ | ⏭️ |
+| cifs/169 | ✅ | ✅ | ✅ | ✅ |
+| cifs/170 | ❌ | ✅ | ✅ | ⏭️ |
+| cifs/171 | ❌ | ✅ | ❌ | ⏭️ |
+| cifs/172 | ⏭️ | ⏭️ | ✅ | ⏭️ |
+| cifs/173 | ✅ | ✅ | ✅ | ✅ |
+| cifs/174 | ✅ | ✅ | ✅ | ✅ |
+| cifs/175 | ✅ | ✅ | ✅ | ✅ |
+| cifs/176 | ⏭️ | ⏭️ | ⏭️ | ⏭️ |
+| cifs/177 | ✅ | ✅ | ✅ | ⏭️ |
+| cifs/178 | ✅ | ❌ | ⏭️ | ✅ |
+| cifs/179 | ❌ | ❌ | ✅ | ✅ |
+| cifs/181 | ⏭️ | ⏭️ | ⏭️ | ⏭️ |
+| cifs/182 | ✅ | ✅ | ✅ | ✅ |
+| cifs/183 | ⏭️ | ✅ | ✅ | ✅ |
+| cifs/184 | ✅ | ✅ | ✅ | ✅ |
+| cifs/185 | ⏭️ | ⏭️ | ⏭️ | ⏭️ |
+| cifs/186 | ✅ | ✅ | ✅ | ✅ |
+| cifs/187 | ✅ | ✅ | ✅ | ✅ |
+| cifs/188 | ⏭️ | ✅ | ✅ | ✅ |
+| cifs/189 | ⏭️ | ⏭️ | ⏭️ | ⏭️ |
+| cifs/190 | ✅ | ✅ | ✅ | ✅ |
+| cifs/191 | ❌ | ❌ | ❌ | ⏭️ |
+| cifs/192 | ✅ | ❌ | ❌ | ❌ |
+| cifs/193 | ✅ | ✅ | ✅ | ✅ |
+| cifs/194 | ❌ | ❌ | ❌ | ❌ |
+| cifs/195 | ✅ | ✅ | ✅ | ✅ |
+| cifs/196 | ✅ | ✅ | ✅ | ✅ |
+| cifs/197 | ⏭️ | ⏭️ | ⏭️ | ⏭️ |
+| cifs/198 | ✅ | ✅ | ❌ | ❌ |
+| cifs/199 | ✅ | ✅ | ✅ | ✅ |
+| cifs/200 | ✅ | ✅ | ✅ | ✅ |
+| cifs/201 | ✅ | ✅ | ✅ | ✅ |
+| cifs/202 | ✅ | ✅ | ✅ | ✅ |
+| cifs/203 | ✅ | ⏭️ | ⏭️ | ⏭️ |
+| cifs/206 | ✅ | ❌ | ⏭️ | ✅ |
+| cifs/207 | ❌ | ❌ | ✅ | ✅ |
+| cifs/208 | ✅ | ✅ | ✅ | ✅ |
+| cifs/209 | ✅ | ✅ | ✅ | ✅ |
+| cifs/210 | ✅ | ✅ | ✅ | ✅ |
+| cifs/211 | ✅ | ✅ | ✅ | ✅ |
+| cifs/212 | ✅ | ✅ | ✅ | ✅ |
+| cifs/213 | ✅ | ✅ | ✅ | ✅ |
+| cifs/214 | ✅ | ✅ | ✅ | ✅ |
+| cifs/215 | ✅ | ✅ | ✅ | ✅ |
+| cifs/216 | ✅ | ❌ | ❌ | ✅ |
+| cifs/217 | ✅ | ✅ | ✅ | ✅ |
+| cifs/218 | ✅ | ✅ | ✅ | ✅ |
+| cifs/219 | ✅ | ✅ | ✅ | ✅ |
+| cifs/220 | ⏭️ | ⏭️ | ⏭️ | ⏭️ |
+| cifs/221 | ❌ | ✅ | ❌ | ✅ |
+| cifs/222 | ⏭️ | ✅ | ✅ | ✅ |
+| cifs/223 | ✅ | ✅ | ✅ | ✅ |
+| cifs/224 | ⏭️ | ⏭️ | ⏭️ | ⏭️ |
+| cifs/225 | ⏭️ | ❌ | ❌ | ⏭️ |
+| cifs/226 | ✅ | ⏭️ | ✅ | ✅ |
+| cifs/227 | ✅ | ⏭️ | ✅ | ✅ |
+| cifs/228 | ✅ | ✅ | ✅ | ✅ |
+| cifs/229 | ⏭️ | ⏭️ | ⏭️ | ⏭️ |
+| cifs/230 | ✅ | ✅ | ✅ | ✅ |
+| cifs/231 | ✅ | ✅ | ✅ | ✅ |
+| cifs/232 | ✅ | ❌ | ✅ | ⏭️ |
+| cifs/233 | ✅ | ⏭️ | ✅ | ✅ |
+| cifs/234 | ⏭️ | ⏭️ | ⏭️ | ⏭️ |
+| cifs/235 | ✅ | ✅ | ✅ | ✅ |
+| cifs/236 | ✅ | ✅ | ✅ | ✅ |
+| cifs/237 | ✅ | ✅ | ✅ | ✅ |
+| cifs/238 | ❌ | ❌ | ❌ | ❌ |
+| cifs/239 | ✅ | ✅ | ✅ | ✅ |
+| cifs/240 | ⏭️ | ⏭️ | ⏭️ | ⏭️ |
+| cifs/241 | ✅ | ✅ | ✅ | ✅ |
+| cifs/242 | ✅ | ✅ | ✅ | ✅ |
+| cifs/243 | ✅ | ✅ | ✅ | ✅ |
+| cifs/244 | ✅ | ✅ | ⏭️ | ⏭️ |
+| cifs/245 | ✅ | ✅ | ✅ | ✅ |
+| cifs/246 | ✅ | ✅ | ✅ | ✅ |
+| cifs/247 | ⏭️ | ✅ | ✅ | ✅ |
+| cifs/248 | ⏭️ | ⏭️ | ⏭️ | ⏭️ |
+| cifs/249 | ✅ | ✅ | ✅ | ✅ |
+| cifs/250 | ✅ | ✅ | ✅ | ✅ |
+| cifs/251 | ✅ | ✅ | ❌ | ✅ |
+| cifs/252 | ⏭️ | ⏭️ | ⏭️ | ⏭️ |
+| cifs/253 | ⏭️ | ✅ | ✅ | ✅ |
+| cifs/254 | ✅ | ⏭️ | ⏭️ | ✅ |
+| cifs/255 | ✅ | ⏭️ | ✅ | ✅ |
+| cifs/256 | ✅ | ⏱️ | ✅ | ✅ |
+| cifs/257 | ✅ | ✅ | ✅ | ✅ |
+| cifs/258 | ✅ | ✅ | ✅ | ✅ |
+| cifs/259 | ✅ | ✅ | ✅ | ✅ |
+| cifs/260 | ✅ | ✅ | ✅ | ✅ |
+| cifs/261 | ✅ | ✅ | ✅ | ✅ |
+| cifs/262 | ✅ | ✅ | ✅ | ✅ |
+| cifs/263 | ✅ | ✅ | ✅ | ✅ |
+| cifs/264 | ✅ | ✅ | ✅ | ✅ |
+| cifs/265 | ✅ | ✅ | ✅ | ✅ |
+| cifs/266 | ❌ | ✅ | ✅ | ✅ |
+| cifs/267 | ✅ | ✅ | ✅ | ✅ |
+| cifs/268 | ✅ | ✅ | ✅ | ✅ |
+| cifs/269 | ✅ | ✅ | ✅ | ✅ |
+| cifs/270 | ✅ | ✅ | ✅ | ✅ |
+| cifs/271 | ✅ | ✅ | ✅ | ✅ |
+| cifs/272 | ✅ | ✅ | ✅ | ✅ |
+| cifs/273 | ✅ | ✅ | ✅ | ✅ |
+| cifs/274 | ✅ | ✅ | ✅ | ✅ |
+| cifs/275 | ❌ | ⏱️ | ❌ | ✅ |
+| cifs/276 | ✅ | ✅ | ✅ | ✅ |
+| cifs/277 | ✅ | ✅ | ✅ | ✅ |
+| cifs/278 | ✅ | ✅ | ✅ | ✅ |
+| cifs/279 | ✅ | ✅ | ✅ | ✅ |
+| cifs/280 | ✅ | ✅ | ✅ | ✅ |
+| cifs/281 | ⏭️ | ✅ | ✅ | ✅ |
+| cifs/282 | ✅ | ✅ | ✅ | ✅ |
+| cifs/283 | ✅ | ✅ | ✅ | ✅ |
+| cifs/284 | ✅ | ✅ | ✅ | ✅ |
+| cifs/285 | ✅ | ✅ | ✅ | ✅ |
+| cifs/286 | ✅ | ✅ | ✅ | ✅ |
+| cifs/287 | ✅ | ✅ | ✅ | ✅ |
+| cifs/288 | ✅ | ✅ | ✅ | ✅ |
+| cifs/289 | ⏭️ | ⏭️ | ⏭️ | ⏭️ |
+| cifs/290 | ✅ | ✅ | ✅ | ✅ |
+| cifs/291 | ✅ | ✅ | ✅ | ✅ |
+| cifs/292 | ✅ | ✅ | ✅ | ✅ |
+| cifs/293 | ✅ | ✅ | ✅ | ✅ |
+| cifs/294 | ✅ | ✅ | ✅ | ✅ |
+| cifs/295 | ✅ | ✅ | ✅ | ✅ |
+| cifs/296 | ✅ | ✅ | ✅ | ✅ |
+| cifs/297 | ⏭️ | ✅ | ✅ | ✅ |
+| cifs/298 | ✅ | ✅ | ✅ | ✅ |
+| cifs/299 | ✅ | ✅ | ✅ | ✅ |
+| cifs/300 | ✅ | ✅ | ✅ | ✅ |
+| cifs/301 | ✅ | ✅ | ✅ | ✅ |
+| cifs/302 | ✅ | ✅ | ✅ | ✅ |
+| cifs/303 | ✅ | ✅ | ✅ | ✅ |
+| cifs/304 | ✅ | ✅ | ❌ | ✅ |
+| cifs/305 | ✅ | ✅ | ✅ | ✅ |
+| cifs/306 | ✅ | ✅ | ✅ | ✅ |
+| cifs/307 | ✅ | ✅ | ✅ | ✅ |
+| cifs/308 | ✅ | ✅ | ✅ | ✅ |
+| cifs/310 | ❌ | ❌ | ❌ | ✅ |
+| cifs/311 | ✅ | ⏱️ | ✅ | ✅ |
+| cifs/312 | ✅ | ✅ | ✅ | ✅ |
+| cifs/313 | ✅ | ⏭️ | ⏭️ | ⏭️ |
+| cifs/314 | ✅ | ⏭️ | ⏭️ | ⏭️ |
+| cifs/315 | ⏭️ | ⏭️ | ⏭️ | - |
+| cifs/316 | ✅ | ⏭️ | ⏭️ | ⏭️ |
+| cifs/317 | ❌ | ⏭️ | ⏭️ | ⏭️ |
+| cifs/319 | ✅ | ⏭️ | ⏭️ | ⏭️ |
+| cifs/320 | ✅ | ⏭️ | ⏭️ | - |
+| cifs/321 | ✅ | ⏭️ | ⏭️ | ⏭️ |
+| cifs/322 | ✅ | ⏭️ | ⏭️ | ⏭️ |
+| cifs/323 | ✅ | ⏭️ | ⏭️ | - |
+| cifs/324 | ✅ | ⏭️ | ⏭️ | - |
+| cifs/326 | ✅ | ⏭️ | ⏭️ | - |
+| cifs/327 | ✅ | ⏭️ | ⏭️ | - |
+| cifs/328 | ✅ | ⏭️ | ⏭️ | - |
+| cifs/329 | ✅ | ⏭️ | ⏭️ | - |
+| cifs/330 | ✅ | ⏭️ | ⏭️ | - |
+| cifs/331 | ✅ | ⏭️ | ⏭️ | - |
+| cifs/332 | ✅ | ⏭️ | ⏭️ | - |
+| cifs/333 | ✅ | ⏭️ | ⏭️ | - |
+| cifs/334 | ✅ | ✅ | ✅ | ✅ |
+| cifs/335 | ✅ | ❌ | ❌ | ✅ |
+| cifs/336 | ❌ | ✅ | ✅ | ✅ |
+| cifs/337 | ✅ | ✅ | ✅ | ✅ |
+| cifs/338 | ✅ | ✅ | ✅ | ✅ |
+| cifs/339 | ✅ | ✅ | ✅ | ✅ |
+| cifs/340 | ✅ | ✅ | ✅ | ✅ |
+| cifs/341 | ✅ | ❌ | ❌ | ❌ |
+| cifs/342 | ✅ | ✅ | ✅ | ✅ |
+| cifs/344 | ✅ | ✅ | ✅ | ✅ |
+| cifs/346 | ✅ | ✅ | ✅ | ✅ |
+| cifs/347 | ✅ | ✅ | ✅ | ❌ |
+| cifs/348 | ✅ | ✅ | ❌ | ✅ |
+| cifs/350 | ✅ | ✅ | ✅ | ✅ |
+| cifs/351 | ✅ | ❌ | ❌ | ✅ |
+| cifs/352 | ✅ | ✅ | ✅ | ✅ |
+| cifs/353 | ✅ | ✅ | ✅ | ✅ |
+| cifs/354 | ❌ | ✅ | ✅ | ❌ |
+| cifs/355 | ✅ | ⏭️ | ✅ | - |
+| cifs/356 | ✅ | ❌ | ⏭️ | - |
+| cifs/357 | ✅ | ✅ | ✅ | ✅ |
+| cifs/358 | ❌ | ❌ | ✅ | ❌ |
+| cifs/359 | ✅ | ✅ | ✅ | ✅ |
+| cifs/361 | ✅ | ✅ | ✅ | ✅ |
+| cifs/362 | ✅ | ✅ | ✅ | ✅ |
+| cifs/363 | ✅ | ✅ | ✅ | ✅ |
+| cifs/364 | ✅ | ✅ | ✅ | ✅ |
+| cifs/365 | ✅ | ✅ | ✅ | ✅ |
+| cifs/366 | ✅ | ✅ | ✅ | ✅ |
+| cifs/367 | ✅ | ✅ | ✅ | ✅ |
+| cifs/368 | ✅ | ✅ | ✅ | ✅ |
+| cifs/369 | ✅ | ✅ | ✅ | ✅ |
+| cifs/370 | ✅ | ✅ | ✅ | ✅ |
+| cifs/371 | ✅ | ✅ | ✅ | ✅ |
+| cifs/372 | ✅ | ✅ | ✅ | ✅ |
+| cifs/373 | ✅ | ✅ | ✅ | ✅ |
+| cifs/374 | ✅ | ✅ | ✅ | ✅ |
+| cifs/375 | ✅ | ✅ | ✅ | ✅ |
+| cifs/376 | ❌ | ❌ | ❌ | ✅ |
+| cifs/379 | ✅ | ⏭️ | ⏭️ | - |
+| cifs/380 | ✅ | ✅ | ❌ | ❌ |
+| cifs/381 | ✅ | ✅ | ✅ | ✅ |
+| cifs/382 | ✅ | ✅ | ✅ | ❌ |
+| cifs/383 | ✅ | ✅ | ✅ | ✅ |
+| cifs/384 | ✅ | ✅ | ✅ | ✅ |
+| cifs/386 | ✅ | ✅ | ✅ | ✅ |
+| cifs/387 | ✅ | ⏭️ | ⏭️ | - |
+| cifs/388 | ✅ | ❌ | ❌ | ❌ |
+| cifs/389 | ✅ | ✅ | ✅ | ✅ |
+| cifs/390 | ✅ | ⏭️ | ❌ | - |
+| cifs/392 | ✅ | ✅ | ✅ | - |
+| cifs/393 | ❌ | ❌ | ✅ | ✅ |
+| cifs/394 | ❌ | ✅ | ✅ | ❌ |
+| cifs/396 | ✅ | ⏭️ | ⏭️ | ⏭️ |
+| cifs/398 | ✅ | ✅ | ✅ | ✅ |
+| cifs/399 | ✅ | ✅ | ✅ | ✅ |
+| cifs/400 | ✅ | ✅ | ✅ | ✅ |
+| cifs/403 | ✅ | ✅ | ✅ | ✅ |
+| cifs/404 | ✅ | ⏭️ | ⏭️ | - |
+| cifs/406 | ✅ | ✅ | ⏭️ | - |
+| cifs/407 | ✅ | ⏭️ | ✅ | - |

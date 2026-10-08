@@ -47,11 +47,11 @@ pre_cnt=$(dd if="$W/f" bs=4096 count=1 skip=$(((off/4096)-1)) 2>>$seqres.full | 
 [ "$pre_cnt" -eq 0 ] || _fail "pre-hole sample not uniform 'A'"
 
 # Punch hole (zero data) in the middle, keep size
-if ! fallocate --punch-hole --keep-size -o "$off" -l "$len" "$W/f" 2>"$W/err"; then
-    if grep -qiE 'not supported|EOPNOTSUPP|ENOTSUP|EINVAL' "$W/err"; then
+if ! LC_ALL=C fallocate --punch-hole --keep-size -o "$off" -l "$len" "$W/f" 2>"$W/err"; then
+    if grep -qiE 'not supported|keep size mode is unsupported|EOPNOTSUPP|ENOTSUP' "$W/err"; then
         _notrun "sparse/zero-data not supported on this server/share"
     fi
-    _fail "fallocate punch-hole failed: $(cat \"$W/err\")"
+    _fail "fallocate punch-hole failed: $(cat "$W/err")"
 fi
 
 # Size must remain unchanged
